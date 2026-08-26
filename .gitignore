@@ -1,1 +1,6 @@
 /target
+
+# flatpak-builder scratch space
+/.flatpak-builder/
+/build-aux/build/
+/build-aux/repo/

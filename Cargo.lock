@@ -1027,6 +1027,7 @@ dependencies = [
  "powerdisplay-core",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]

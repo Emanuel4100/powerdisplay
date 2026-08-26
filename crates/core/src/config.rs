@@ -273,4 +273,26 @@ mod tests {
     fn an_empty_matcher_never_matches() {
         assert!(OutputMatch::default().score("eDP-1", "", "", "").is_none());
     }
+
+    /// The README teaches people to write this file by hand, so the example in it has to
+    /// actually parse. Read rather than copied, so the two cannot drift apart.
+    #[test]
+    fn the_documented_example_parses() {
+        let readme = include_str!("../../../README.md");
+        let example = readme
+            .split("```toml")
+            .nth(1)
+            .and_then(|block| block.split("```").next())
+            .expect("the README should contain a toml example");
+
+        let config: Config = toml::from_str(example).expect("the README example should parse");
+
+        assert_eq!(config.version, CONFIG_VERSION);
+        assert_eq!(config.on_battery.power_profile.as_deref(), Some("power-saver"));
+        assert_eq!(config.on_ac.power_profile.as_deref(), Some("performance"));
+
+        let rule = &config.on_battery.outputs[0];
+        assert_eq!(rule.matcher.connector.as_deref(), Some("eDP-1"));
+        assert_eq!(rule.mode.as_deref(), Some("1920x1080@60.000"));
+    }
 }

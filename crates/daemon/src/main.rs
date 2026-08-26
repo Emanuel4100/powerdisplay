@@ -93,7 +93,7 @@ fn parse_args() -> Result<Option<Options>, String> {
 
 fn run(options: &Options) -> Result<()> {
     if options.show {
-        return show(&Engine::new(options.dry_run)?);
+        return show(options.dry_run);
     }
 
     if options.apply_now {
@@ -109,7 +109,7 @@ fn run(options: &Options) -> Result<()> {
     watch(wait_for_session(options.dry_run), config)
 }
 
-/// Started from a systemd user unit, the daemon can easily win the race against the
+/// Started at login by the desktop portal, the daemon can easily win the race against the
 /// compositor. Waiting is friendlier than exiting and being restarted in a loop, and it
 /// also covers the compositor being restarted underneath us.
 fn wait_for_session(dry_run: bool) -> Engine {
@@ -131,15 +131,18 @@ fn wait_for_session(dry_run: bool) -> Engine {
     }
 }
 
-fn show(engine: &Engine) -> Result<()> {
-    println!("Backend:      {}", engine.backend_name());
+/// Whatever we can see, printed in the order that survives failure: the power source and
+/// the profiles service do not depend on the compositor, and a session we cannot drive is
+/// precisely when someone runs this.
+fn show(dry_run: bool) -> Result<()> {
     println!("Power source: {}", power::read_state().label());
+    println!("Config:       {}", powerdisplay_core::config::config_path()?.display());
 
-    match engine.power_profile_service() {
-        Some(service) => {
-            let active = engine.active_power_profile().unwrap_or_default();
-            println!("Power profiles: {service}");
-            for profile in engine.power_profiles() {
+    match power::PowerProfiles::connect() {
+        Some(profiles) => {
+            let active = profiles.active().unwrap_or_default();
+            println!("Power profiles: {}", profiles.service_name());
+            for profile in profiles.available().unwrap_or_default() {
                 let marker = if profile == active { "*" } else { " " };
                 println!("  {marker} {profile}");
             }
@@ -147,7 +150,19 @@ fn show(engine: &Engine) -> Result<()> {
         None => println!("Power profiles: none available"),
     }
 
-    println!("Config:       {}", powerdisplay_core::config::config_path()?.display());
+    let engine = match Engine::new(dry_run) {
+        Ok(engine) => engine,
+        Err(err) => {
+            println!("Displays:     unavailable");
+            println!();
+            println!("{err:#}");
+            println!();
+            println!("Set POWERDISPLAY_BACKEND to gnome, kde, wlroots or x11 to force one.");
+            return Ok(());
+        }
+    };
+
+    println!("Backend:      {}", engine.backend_name());
     println!();
 
     for output in engine.outputs()? {

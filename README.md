@@ -30,33 +30,49 @@ performance dropdown explains itself.
 
 ## Installing
 
-Build dependencies:
+This is a Flatpak. A tool whose whole job is reconfiguring the session fits awkwardly
+inside a sandbox, which is why the permissions below are as wide as they are; there is no
+native install path any more.
 
 ```bash
-# Fedora / RHEL
-sudo dnf install cargo gtk4-devel systemd-devel
-
-# Debian / Ubuntu
-sudo apt install cargo libgtk-4-dev libudev-dev
-
-# Arch
-sudo pacman -S rust gtk4 systemd-libs
+flatpak install --user org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak-builder --user --install --force-clean \
+    build-aux/build build-aux/io.github.Emanuel4100.PowerDisplay.yml
+flatpak run io.github.Emanuel4100.PowerDisplay
 ```
 
-Then:
+If you previously installed with `install.sh`, `./uninstall.sh` takes that copy off the
+machine. It leaves `~/.config/powerdisplay` alone unless you pass `--purge`; those settings
+are not shared with the Flatpak.
 
-```bash
-./install.sh                    # into ~/.local
-./install.sh --prefix /usr/local   # system-wide
-```
+A few things about the sandbox are load-bearing rather than decorative:
 
-`./install.sh --uninstall` removes it again and leaves your settings alone.
+- **Settings live under the app.**
+  `~/.var/app/io.github.Emanuel4100.PowerDisplay/config/powerdisplay/config.toml`, not
+  `~/.config/powerdisplay`. A leftover native copy and the Flatpak do not share a file, and
+  running both daemons at once gives you two processes fighting over the same display.
+- **The daemon is started by the desktop portal.** Nothing inside a sandbox may write a
+  systemd unit onto the host, so the checkbox in the window asks the portal for an autostart
+  entry instead. The portal has no way to be asked what it currently has on file, so the
+  window keeps its own note of the setting.
+- **`--share=network` is required**, for an app that otherwise never touches the network.
+  udev delivers power-supply events over a netlink socket that only exists in the host's
+  network namespace. Without it the daemon still works, but it notices the charger on its
+  next resync rather than immediately.
+- **Plasma needs `--talk-name=org.freedesktop.Flatpak`**, because `kscreen-doctor` belongs
+  to the desktop and lives on the host. That permission allows running host commands in
+  general, which is close to no sandbox at all. Delete that line from the manifest if you
+  do not run Plasma; the other three backends are unaffected.
+
+After anything changes `Cargo.lock`, run `build-aux/update-cargo-sources.sh` — the Flatpak
+build has no network and installs every crate from `build-aux/cargo-sources.json`.
 
 ## Using it
 
-Run `powerdisplay`, pick what each tab should do, and press **Save**. Then turn on
-**Run automatically in the background** from the menu in the header bar — that is what
-enables the `powerdisplayd` user service, and nothing happens automatically until you do.
+Run `flatpak run io.github.Emanuel4100.PowerDisplay`, pick what each tab should do, and
+press **Save**. Then turn on **Run automatically in the background** from the menu in the
+header bar — that asks the desktop to start `powerdisplayd` at login, and nothing happens
+automatically until you do.
 
 **Apply now** tries the current tab's settings straight away without saving them, which is
 the quick way to check a mode actually works before committing to it.
@@ -65,10 +81,20 @@ The **Remember this layout in the desktop's display settings** checkbox decides 
 the change is temporary or written into your desktop's saved configuration. Leaving it off
 is the safer choice: your normal display settings stay exactly as you left them.
 
+On GNOME there is a second reason to leave it off. Mutter shows its **Keep changes?**
+countdown for every configuration it is asked to save, and it offers no way to say that the
+request did not come from a person clicking something — so switching this on means that
+dialog appears on every single switch, including the periodic resyncs. There is no way
+around it short of a GNOME Shell extension, which would suppress the dialog for the real
+Settings app too. Since the daemon reapplies your settings on every power change, on resume
+and on hotplug regardless, the saved copy buys you very little.
+
 ## Configuration file
 
-Everything lives in `~/.config/powerdisplay/config.toml`. The daemon re-reads it whenever
-it changes, so editing it by hand works as well as using the window.
+Everything lives in
+`~/.var/app/io.github.Emanuel4100.PowerDisplay/config/powerdisplay/config.toml`. The
+daemon re-reads it whenever it changes, so editing it by hand works as well as using the
+window.
 
 ```toml
 version = 1
@@ -98,22 +124,27 @@ connector = "eDP-1"
 
 A `match` block may name `connector`, `make`, `model` and `serial`. The EDID fields are
 weighted above the connector, so a monitor that moves from one port to another is still
-recognised. `powerdisplayd --show` prints every display and every mode id it can see,
-which is where the values above come from.
+recognised.
+`flatpak run --command=powerdisplayd io.github.Emanuel4100.PowerDisplay --show` prints
+every display and every mode id it can see, which is where the values above come from.
 
 ## Command line
 
 ```
-powerdisplayd --show        # what session, power source and modes were detected
-powerdisplayd --apply-now   # apply the matching profile once and exit
-powerdisplayd --dry-run     # log what would change, change nothing
+flatpak run --command=powerdisplayd io.github.Emanuel4100.PowerDisplay --show
+flatpak run --command=powerdisplayd io.github.Emanuel4100.PowerDisplay --apply-now
+flatpak run --command=powerdisplayd io.github.Emanuel4100.PowerDisplay --dry-run
 ```
+
+`--show` prints what session, power source and modes were detected. `--apply-now` applies
+the matching profile once and exits. `--dry-run` logs what would change and changes
+nothing.
 
 ## How it works
 
 ```
                 power_supply udev events ─┐
-        ~/.config/powerdisplay/config.toml ├─→ powerdisplayd ─→ display backend
+  ~/.var/app/.../config/powerdisplay/config.toml ├─→ powerdisplayd ─→ display backend
                      DRM hotplug events ─┤                   └→ power profiles D-Bus
               logind PrepareForSleep(false) ┘
 ```

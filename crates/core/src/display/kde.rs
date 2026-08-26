@@ -14,6 +14,21 @@ use super::{DisplayBackend, Mode, Output, OutputSetting, format_mode_id};
 
 const TOOL: &str = "kscreen-doctor";
 
+/// Builds an invocation of `kscreen-doctor`.
+///
+/// The tool belongs to Plasma and is therefore on the host, not in our sandbox, so inside
+/// a Flatpak the call has to be handed out through `flatpak-spawn`. Everywhere else this is
+/// a plain exec.
+fn tool() -> Command {
+    if crate::sandboxed() {
+        let mut command = Command::new("flatpak-spawn");
+        command.arg("--host").arg(TOOL);
+        command
+    } else {
+        Command::new(TOOL)
+    }
+}
+
 pub struct KdeBackend {
     _private: (),
 }
@@ -28,7 +43,7 @@ impl KdeBackend {
     }
 
     fn query(&self) -> Result<Vec<KdeOutput>> {
-        let output = Command::new(TOOL)
+        let output = tool()
             .arg("-j")
             .output()
             .with_context(|| format!("running {TOOL}"))?;
@@ -97,7 +112,7 @@ impl DisplayBackend for KdeBackend {
         }
 
         // One invocation so KScreen validates and commits the whole layout at once.
-        let result = Command::new(TOOL)
+        let result = tool()
             .args(&args)
             .output()
             .with_context(|| format!("running {TOOL}"))?;

@@ -177,7 +177,7 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
                     } else if autostart::available() {
                         "Saved. Turn on automatic switching in the menu to apply it in the background."
                     } else {
-                        "Saved. Start powerdisplayd to apply it automatically."
+                        "Saved. Start the daemon to apply it automatically."
                     };
                     set_status(&status, message, false);
                 }

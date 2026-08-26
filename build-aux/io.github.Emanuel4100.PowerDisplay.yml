@@ -1,0 +1,79 @@
+# Flatpak build for powerdisplay.
+#
+# Both binaries ship in the one app: `powerdisplay` is the settings window and is the
+# default command, and `powerdisplayd` is the background service, started either by the
+# desktop portal's autostart entry or by hand with
+#
+#     flatpak run --command=powerdisplayd io.github.Emanuel4100.PowerDisplay
+#
+# Settings live in ~/.var/app/io.github.Emanuel4100.PowerDisplay/config, which is the
+# usual Flatpak XDG overlay and is not shared with a leftover native install.
+app-id: io.github.Emanuel4100.PowerDisplay
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: powerdisplay
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/powerdisplay/cargo
+
+finish-args:
+  # Wayland is the common case; fallback-x11 hands over the X socket only in a session
+  # that has no Wayland one, which is what the RandR backend needs.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+
+  # Power-supply events arrive over a udev netlink socket that only exists in the host's
+  # network namespace. Without this the daemon never hears the charger go in and is left
+  # re-reading /sys on its resync timer, which turns an instant switch into a slow one.
+  - --share=network
+
+  # Reading and setting the display layout, one name per desktop we support.
+  - --talk-name=org.gnome.Mutter.DisplayConfig
+  - --talk-name=org.kde.KWin
+
+  # Performance profiles, under both the name power-profiles-daemon uses and the one
+  # tuned-ppd answers to.
+  - --system-talk-name=net.hadess.PowerProfiles
+  - --system-talk-name=org.freedesktop.UPower.PowerProfiles
+
+  # Suspend and resume notification, so the mode is reapplied on wake.
+  - --system-talk-name=org.freedesktop.login1
+
+  # Plasma's kscreen-doctor is part of the desktop and so is on the host, not in here.
+  # This permission is how the KDE backend reaches it, and it is worth being honest that
+  # it is a wide one: anything that can spawn host commands can leave the sandbox. Drop
+  # this line if you do not run Plasma, and the other three backends still work.
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  - name: powerdisplay
+    buildsystem: simple
+    build-commands:
+      - cargo --offline build --release --locked
+      - install -Dm755 target/release/powerdisplay /app/bin/powerdisplay
+      - install -Dm755 target/release/powerdisplayd /app/bin/powerdisplayd
+      - install -Dm644 data/$FLATPAK_ID.desktop
+        /app/share/applications/$FLATPAK_ID.desktop
+      - install -Dm644 data/$FLATPAK_ID.svg
+        /app/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg
+      - install -Dm644 data/$FLATPAK_ID.metainfo.xml
+        /app/share/metainfo/$FLATPAK_ID.metainfo.xml
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .flatpak-builder
+          - build-aux/build
+          - build-aux/repo
+          - target
+      # Every crate in Cargo.lock, so the build itself needs no network.
+      # Regenerate with build-aux/update-cargo-sources.sh after changing dependencies.
+      - cargo-sources.json

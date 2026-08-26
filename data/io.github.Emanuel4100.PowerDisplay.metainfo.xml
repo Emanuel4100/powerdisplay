@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Emanuel4100.PowerDisplay</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Power Display</name>
+  <summary>Match your screen to your power source</summary>
+
+  <description>
+    <p>
+      A high refresh rate is worth the battery it costs while you are plugged in, and
+      rarely worth it once you are not. Power Display makes that trade automatically:
+      pick a resolution, a refresh rate and a performance mode for each power state, and
+      the switch happens the moment the charger goes in or comes out.
+    </p>
+    <p>
+      Settings are per monitor and are matched by make, model and serial, so an external
+      display keeps its own configuration across unplugging and replugging. Changes are
+      also reapplied when a monitor is connected and when the machine resumes from
+      suspend.
+    </p>
+    <p>It works on the display server you already run:</p>
+    <ul>
+      <li>GNOME, through Mutter</li>
+      <li>KDE Plasma, through KWin</li>
+      <li>wlroots compositors including Sway, Hyprland, river and Wayfire</li>
+      <li>X11, through RandR</li>
+    </ul>
+    <p>
+      Performance modes are handled by power-profiles-daemon or tuned-ppd, so no part of
+      this needs root.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.Emanuel4100.PowerDisplay.desktop</launchable>
+
+  <url type="homepage">https://github.com/Emanuel4100/powerdisplay</url>
+  <url type="bugtracker">https://github.com/Emanuel4100/powerdisplay/issues</url>
+  <url type="vcs-browser">https://github.com/Emanuel4100/powerdisplay</url>
+
+  <developer id="io.github.emanuel4100">
+    <name>Emanuel</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <categories>
+    <category>Settings</category>
+    <category>HardwareSettings</category>
+  </categories>
+
+  <keywords>
+    <keyword>display</keyword>
+    <keyword>monitor</keyword>
+    <keyword>resolution</keyword>
+    <keyword>refresh rate</keyword>
+    <keyword>battery</keyword>
+    <keyword>power</keyword>
+  </keywords>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">600</display_length>
+  </requires>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#99c1f1</color>
+    <color type="primary" scheme_preference="dark">#1a5fb4</color>
+  </branding>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-27">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

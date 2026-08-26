@@ -11,7 +11,7 @@ mod window;
 use gtk::prelude::*;
 use gtk::{Application, ApplicationWindow, gdk};
 
-const APP_ID: &str = "io.github.powerdisplay.Powerdisplay";
+const APP_ID: &str = "io.github.Emanuel4100.PowerDisplay";
 const STYLE: &str = include_str!("style.css");
 
 fn main() -> gtk::glib::ExitCode {
