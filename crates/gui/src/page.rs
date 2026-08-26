@@ -235,6 +235,7 @@ impl ProfilePage {
         outputs: &[Output],
         power_profiles: &[String],
         supports_persist: bool,
+        persist_hint: &str,
         on_change: Rc<dyn Fn()>,
     ) -> Self {
         let content = GtkBox::new(Orientation::Vertical, 18);
@@ -311,13 +312,9 @@ impl ProfilePage {
         }
 
         let persist = CheckButton::with_label("Remember this layout in the desktop's display settings");
-        persist.set_active(profile.persist_display_config);
+        persist.set_active(profile.persist_display_config && supports_persist);
         persist.set_sensitive(supports_persist);
-        persist.set_tooltip_text(Some(if supports_persist {
-            "Off: the change is temporary and your saved display settings are left alone"
-        } else {
-            "This desktop always remembers display changes"
-        }));
+        persist.set_tooltip_text(Some(persist_hint));
         persist.connect_toggled({
             let on_change = on_change.clone();
             move |_| on_change()

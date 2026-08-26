@@ -105,11 +105,13 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
         }
     });
 
+    let persist_hint = persist_hint(engine.backend_name(), engine.supports_persist());
     let battery = Rc::new(ProfilePage::build(
         &config.borrow().on_battery,
         &outputs,
         &power_profiles,
         engine.supports_persist(),
+        persist_hint,
         on_change.clone(),
     ));
     let ac = Rc::new(ProfilePage::build(
@@ -117,6 +119,7 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
         &outputs,
         &power_profiles,
         engine.supports_persist(),
+        persist_hint,
         on_change.clone(),
     ));
 
@@ -277,6 +280,16 @@ fn menu_button(window: &ApplicationWindow, engine: &Rc<Engine>, state: PowerStat
         .popover(&popover)
         .tooltip_text("Options")
         .build()
+}
+
+fn persist_hint(backend: &str, supports_persist: bool) -> &'static str {
+    if supports_persist {
+        "Off: the change is temporary and your saved display settings are left alone"
+    } else if backend.starts_with("GNOME") {
+        "GNOME would show a Keep changes? countdown and revert after 20 seconds if you don't confirm, so automatic switching has to stay temporary"
+    } else {
+        "This desktop always remembers display changes"
+    }
 }
 
 fn set_status(status: &Label, message: &str, is_error: bool) {

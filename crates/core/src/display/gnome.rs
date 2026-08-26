@@ -100,7 +100,10 @@ impl DisplayBackend for GnomeBackend {
     }
 
     fn supports_persist(&self) -> bool {
-        true
+        // Mutter's persistent method always puts up the Keep changes? countdown and
+        // reverts after 20 seconds if nobody confirms. Automatic switching cannot wait
+        // for a person, so we only ever apply temporarily.
+        false
     }
 
     fn outputs(&self) -> Result<Vec<Output>> {
