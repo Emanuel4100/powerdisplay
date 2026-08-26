@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 
 use crate::config::{Config, PowerState};
-use crate::display::{self, DisplayBackend, Output, resolve_settings};
+use crate::display::{self, DisplayBackend, Output, OutputSetting, resolve_settings};
 use crate::power::PowerProfiles;
 
 /// What an apply actually did, kept separate from the logging so the GUI can show it too.
@@ -122,11 +122,22 @@ impl Engine {
         let (settings, warnings) = resolve_settings(&profile.outputs, &outputs);
         report.warnings.extend(warnings);
 
-        if settings.is_empty() {
+        let needed: Vec<OutputSetting> = settings
+            .into_iter()
+            .filter(|setting| {
+                outputs
+                    .iter()
+                    .find(|output| output.connector == setting.connector)
+                    .and_then(|output| output.current_mode.as_deref())
+                    != Some(setting.mode_id.as_str())
+            })
+            .collect();
+
+        if needed.is_empty() {
             return;
         }
 
-        let described: Vec<String> = settings
+        let described: Vec<String> = needed
             .iter()
             .map(|setting| format!("{} to {}", setting.connector, setting.mode_id))
             .collect();
@@ -137,7 +148,7 @@ impl Engine {
         }
 
         let persist = profile.persist_display_config && self.backend.supports_persist();
-        match self.backend.apply(&settings, persist) {
+        match self.backend.apply(&needed, persist) {
             Ok(()) => report.actions.push(format!("set {}", described.join(", "))),
             Err(err) => report.errors.push(format!("display change failed: {err:#}")),
         }
@@ -412,5 +423,30 @@ mod tests {
             engine.apply(&config, PowerState::Ac).actions,
             vec!["would set eDP-1 to 2880x1800@120.000"]
         );
+    }
+
+    fn laptop_already_at(mode_id: &str) -> Vec<Output> {
+        let mut outputs = laptop();
+        outputs[0].current_mode = Some(mode_id.to_string());
+        for mode in &mut outputs[0].modes {
+            mode.current = mode.id == mode_id;
+        }
+        outputs
+    }
+
+    #[test]
+    fn already_correct_modes_do_not_touch_the_compositor() {
+        let backend = StubBackend::new(laptop_already_at("1920x1080@60.000"));
+        let log = backend.applied.clone();
+        let engine = Engine::with_backend(Box::new(backend), false);
+        let config = config_with(Profile {
+            outputs: vec![rule("eDP-1", "1920x1080@60.000")],
+            ..Default::default()
+        });
+
+        let report = engine.apply(&config, PowerState::Battery);
+        assert!(report.succeeded(), "{report:?}");
+        assert!(report.actions.is_empty());
+        assert!(log.lock().unwrap().is_empty());
     }
 }

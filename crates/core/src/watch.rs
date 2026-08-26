@@ -39,6 +39,23 @@ pub fn spawn_kernel_uevents(
     spawn_uevent_monitor(UdevSource::Kernel, subsystem, resync, on_event)
 }
 
+/// Opens a monitor and drops it. Used by `--self-test` to prove the sandbox can see
+/// netlink at all, without occupying a watcher thread.
+pub fn probe_monitor(source: UdevSource) -> Result<()> {
+    let builder = match source {
+        UdevSource::Userspace => udev::MonitorBuilder::new().context("creating a udev monitor")?,
+        UdevSource::Kernel => {
+            udev::MonitorBuilder::new_kernel().context("creating a kernel uevent monitor")?
+        }
+    };
+    let _monitor = builder
+        .match_subsystem("power_supply")
+        .context("filtering udev events to power_supply")?
+        .listen()
+        .context("listening for udev events")?;
+    Ok(())
+}
+
 fn spawn_uevent_monitor(
     source: UdevSource,
     subsystem: &'static str,

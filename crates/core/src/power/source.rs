@@ -30,10 +30,10 @@ pub struct SupplyReading {
 }
 
 pub fn read_state() -> PowerState {
-    classify(&read_supplies(Path::new(SUPPLY_ROOT)))
+    classify(&read_supplies_at(Path::new(SUPPLY_ROOT)))
 }
 
-fn read_supplies(root: &Path) -> Vec<SupplyReading> {
+pub fn read_supplies_at(root: &Path) -> Vec<SupplyReading> {
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
@@ -90,15 +90,54 @@ pub fn classify(supplies: &[SupplyReading]) -> PowerState {
     }
 }
 
-/// Sends the current state immediately, then again on every change.
+/// Requires two identical readings in a row before announcing a change.
+///
+/// USB-C ports and charge-limit firmware glitch `online` for a single poll. Acting on
+/// that would flip the panel to 60 Hz and back, which is what "autoswitch is broken"
+/// looks like on this laptop.
+#[derive(Debug)]
+pub struct DebouncedState {
+    published: PowerState,
+    candidate: Option<PowerState>,
+}
+
+impl DebouncedState {
+    pub fn new(initial: PowerState) -> Self {
+        Self {
+            published: initial,
+            candidate: None,
+        }
+    }
+
+    pub fn published(&self) -> PowerState {
+        self.published
+    }
+
+    /// Returns `Some` when `current` should be announced as the new power source.
+    pub fn observe(&mut self, current: PowerState) -> Option<PowerState> {
+        if current == self.published {
+            self.candidate = None;
+            return None;
+        }
+        if self.candidate == Some(current) {
+            self.published = current;
+            self.candidate = None;
+            return Some(current);
+        }
+        self.candidate = Some(current);
+        None
+    }
+}
+
+/// Sends the current state immediately, then again on every confirmed change.
 ///
 /// Udev is the fast path. A short sysfs poll sits behind it because a Flatpak often never
 /// sees `power_supply` netlink messages — the socket is in the host network namespace and
 /// the udev database under `/run/udev` is not in the sandbox — and the previous 60-second
 /// resync felt like the app had simply stopped working.
 pub fn spawn_watcher(tx: Sender<PowerState>) -> Result<JoinHandle<()>> {
-    let last = Arc::new(Mutex::new(read_state()));
-    let _ = tx.send(locked_state(&last));
+    let last = Arc::new(Mutex::new(DebouncedState::new(read_state())));
+    let _ = tx.send(locked_published(&last));
 
     let udev_last = last.clone();
     let udev_tx = tx.clone();
@@ -127,18 +166,19 @@ pub fn spawn_watcher(tx: Sender<PowerState>) -> Result<JoinHandle<()>> {
         .map_err(Into::into)
 }
 
-fn locked_state(last: &Mutex<PowerState>) -> PowerState {
-    *last.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn locked_published(last: &Mutex<DebouncedState>) -> PowerState {
+    last.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .published()
 }
 
-fn publish(last: &Mutex<PowerState>, tx: &Sender<PowerState>) -> bool {
+fn publish(last: &Mutex<DebouncedState>, tx: &Sender<PowerState>) -> bool {
     let current = read_state();
     let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if current == *last {
-        return true;
+    match last.observe(current) {
+        Some(state) => tx.send(state).is_ok(),
+        None => true,
     }
-    *last = current;
-    tx.send(current).is_ok()
 }
 
 #[cfg(test)]
@@ -200,5 +240,32 @@ mod tests {
     fn a_discharging_battery_wins_over_a_silent_adapter() {
         let supplies = [supply("Battery", None, Some("Discharging"))];
         assert_eq!(classify(&supplies), PowerState::Battery);
+    }
+
+    #[test]
+    fn a_usb_c_port_that_is_offline_does_not_hide_a_live_adapter() {
+        let supplies = [
+            supply("Mains", Some(true), None),
+            supply("USB", Some(false), None),
+            supply("Battery", None, Some("Not charging")),
+        ];
+        assert_eq!(classify(&supplies), PowerState::Ac);
+    }
+
+    #[test]
+    fn a_single_glitch_does_not_publish_a_power_change() {
+        let mut state = DebouncedState::new(PowerState::Ac);
+        assert_eq!(state.observe(PowerState::Battery), None);
+        assert_eq!(state.published(), PowerState::Ac);
+        assert_eq!(state.observe(PowerState::Ac), None);
+        assert_eq!(state.published(), PowerState::Ac);
+    }
+
+    #[test]
+    fn two_matching_readings_publish_the_new_source() {
+        let mut state = DebouncedState::new(PowerState::Ac);
+        assert_eq!(state.observe(PowerState::Battery), None);
+        assert_eq!(state.observe(PowerState::Battery), Some(PowerState::Battery));
+        assert_eq!(state.published(), PowerState::Battery);
     }
 }

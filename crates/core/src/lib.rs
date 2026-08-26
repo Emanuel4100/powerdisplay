@@ -1,8 +1,11 @@
 pub mod config;
+pub mod control;
 pub mod display;
 pub mod engine;
 pub mod events;
+pub mod instance;
 pub mod power;
+pub mod sandbox;
 pub mod watch;
 
 /// Whether we are running inside a Flatpak sandbox.
@@ -15,6 +18,7 @@ pub fn sandboxed() -> bool {
 }
 
 pub use config::{Config, PowerState, Profile};
+pub use control::Controller;
 pub use display::{DisplayBackend, Mode, Output, OutputSetting};
 pub use engine::{ApplyReport, Engine};
 pub use events::{Event, EventSources};

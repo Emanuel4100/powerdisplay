@@ -64,6 +64,17 @@ flatpak run --command=powerdisplayd io.github.Emanuel4100.PowerDisplay --show
 
 If the wrong display backend is picked, set `POWERDISPLAY_BACKEND` to `gnome`, `kde`, `wlroots`, or `x11`.
 
+After reinstalling the Flatpak, open the settings window once. That restarts the background service so it is not left running from the previous install.
+
+## Tests
+
+```bash
+cargo test --workspace
+build-aux/test-sandbox.sh
+```
+
+`test-sandbox.sh` runs the unit tests, then `powerdisplayd --self-test` inside the installed Flatpak. That probe is what catches sandbox holes (no `/sys/class/power_supply`, no udev socket, no Mutter on the bus) that host tests cannot see.
+
 ## Notes
 
 - GNOME, KDE (via `kscreen-doctor`), wlroots compositors, and X11 (RandR).

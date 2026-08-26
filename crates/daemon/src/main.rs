@@ -13,6 +13,7 @@ use powerdisplay_core::config::{Config, PowerState};
 use powerdisplay_core::engine::Engine;
 use powerdisplay_core::events::{Event, EventSources};
 use powerdisplay_core::power;
+use powerdisplay_core::{Controller, instance, sandbox};
 
 const USAGE: &str = "\
 powerdisplayd - apply a display mode and power profile based on the power source
@@ -23,6 +24,7 @@ Options:
       --apply-now   Apply the profile for the current power source, then exit
       --show        Print the detected session, power source and available modes
       --dry-run     Log what would change without changing anything
+      --self-test   Probe sysfs, udev, D-Bus and the display backend, then exit
   -v, --verbose     Log at debug level
   -V, --version     Print the version
   -h, --help        Print this message
@@ -37,6 +39,7 @@ struct Options {
     apply_now: bool,
     show: bool,
     dry_run: bool,
+    self_test: bool,
     verbose: bool,
 }
 
@@ -56,6 +59,7 @@ fn main() -> ExitCode {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(level)),
         )
+        .with_writer(std::io::stderr)
         .with_target(false)
         .without_time()
         .init();
@@ -76,6 +80,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--apply-now" => options.apply_now = true,
             "--show" => options.show = true,
             "--dry-run" => options.dry_run = true,
+            "--self-test" => options.self_test = true,
             "-v" | "--verbose" => options.verbose = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
@@ -92,6 +97,10 @@ fn parse_args() -> Result<Option<Options>, String> {
 }
 
 fn run(options: &Options) -> Result<()> {
+    if options.self_test {
+        return run_self_test();
+    }
+
     if options.show {
         return show(options.dry_run);
     }
@@ -105,8 +114,26 @@ fn run(options: &Options) -> Result<()> {
         return Ok(());
     }
 
+    let _lock = match instance::try_acquire()? {
+        Some(file) => file,
+        None => {
+            tracing::info!("another powerdisplayd is already running");
+            return Ok(());
+        }
+    };
+
     let config = Config::load().context("loading the configuration")?;
     watch(wait_for_session(options.dry_run), config)
+}
+
+fn run_self_test() -> Result<()> {
+    let report = sandbox::probe();
+    print!("{}", sandbox::format_report(&report));
+    if report.passed() {
+        Ok(())
+    } else {
+        anyhow::bail!("self-test failed")
+    }
 }
 
 /// Started at login by the desktop portal, the daemon can easily win the race against the
@@ -185,7 +212,7 @@ fn show(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn watch(engine: Engine, mut config: Config) -> Result<()> {
+fn watch(engine: Engine, config: Config) -> Result<()> {
     let sources = EventSources::spawn().context("starting the system watchers")?;
 
     tracing::info!(
@@ -193,17 +220,23 @@ fn watch(engine: Engine, mut config: Config) -> Result<()> {
         "watching for power source changes"
     );
 
-    let mut state = power::read_state();
-    let mut pending = config
-        .apply_on_start
-        .then(|| Pending::new(Event::Power(state)));
+    let mut controller = Controller::new(config, power::read_state(), Instant::now());
 
     loop {
-        let deadline = pending.as_ref().map(Pending::deadline);
-        let received = match deadline {
-            Some(at) => sources
-                .rx
-                .recv_timeout(at.saturating_duration_since(Instant::now())),
+        // Apply *before* reading the next event. After our own mode set, DRM udev events
+        // keep arriving; a `recv_timeout(0)` on a non-empty channel would starve the
+        // timeout branch and never apply again — which is how GNOME's saved 60 Hz layout
+        // won over the AC profile after a reinstall.
+        if controller.take_due(Instant::now()) {
+            let state = power::read_state();
+            controller.applied(state);
+            let report = engine.apply(controller.config(), state);
+            log_report(state, &report);
+            continue;
+        }
+
+        let received = match controller.wait(Instant::now()) {
+            Some(timeout) => sources.rx.recv_timeout(timeout),
             None => sources.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
 
@@ -212,83 +245,34 @@ fn watch(engine: Engine, mut config: Config) -> Result<()> {
                 tracing::debug!(?event, "event");
                 match event {
                     Event::Power(new_state) => {
-                        if new_state == state {
-                            // Watchers re-read on a timer. A duplicate must not restart
-                            // the debounce, or a 250ms poll would postpone the apply
-                            // forever by never letting the dust settle.
-                            continue;
+                        if new_state != controller.state() {
+                            tracing::info!(state = new_state.label(), "power source changed");
                         }
-                        tracing::info!(state = new_state.label(), "power source changed");
-                        state = new_state;
+                        controller.on_event(event, Instant::now());
                     }
                     Event::ConfigChanged => match Config::load() {
                         Ok(reloaded) => {
-                            // Editors touch a file several times per save, and a
-                            // re-read that changed nothing is not worth acting on.
-                            if reloaded == config {
-                                continue;
+                            if controller.reload_config(reloaded, Instant::now()) {
+                                tracing::info!("configuration reloaded");
                             }
-                            tracing::info!("configuration reloaded");
-                            config = reloaded;
                         }
                         Err(err) => {
                             tracing::error!("keeping the previous configuration: {err:#}");
-                            continue;
                         }
                     },
-                    Event::DisplaysChanged | Event::Resumed => {}
+                    Event::DisplaysChanged | Event::Resumed => {
+                        controller.on_event(event, Instant::now());
+                    }
                 }
-
-                // Coalesce: every new event pushes the deadline out, so a burst of dock
-                // events produces exactly one apply once things go quiet.
-                pending = Some(match pending {
-                    Some(pending) => pending.extend(event),
-                    None => Pending::new(event),
-                });
             }
             Err(RecvTimeoutError::Timeout) => {
-                pending = None;
-                // Re-read rather than trusting the last event: the state may have flipped
-                // back and forth while we were waiting for it to settle.
-                state = power::read_state();
-                let report = engine.apply(&config, state);
-                log_report(state, &report);
+                // The next loop iteration's take_due handles the apply. Falling through
+                // keeps one code path for "it is time".
             }
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("all system watchers stopped");
             }
         }
-    }
-}
-
-/// An apply that is waiting for events to stop arriving.
-struct Pending {
-    settles_at: Instant,
-    /// Hard limit on the coalescing, so a misbehaving event source cannot postpone the
-    /// apply indefinitely by trickling events in.
-    latest: Instant,
-}
-
-impl Pending {
-    const MAX_WAIT: Duration = Duration::from_secs(10);
-
-    fn new(event: Event) -> Self {
-        let now = Instant::now();
-        Self {
-            settles_at: now + event.settle_delay(),
-            latest: now + Self::MAX_WAIT,
-        }
-    }
-
-    fn extend(self, event: Event) -> Self {
-        Self {
-            settles_at: (Instant::now() + event.settle_delay()).max(self.settles_at),
-            latest: self.latest,
-        }
-    }
-
-    fn deadline(&self) -> Instant {
-        self.settles_at.min(self.latest)
     }
 }
 

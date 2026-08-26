@@ -10,10 +10,13 @@
 //! install has been removed.
 
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use powerdisplay_core::instance;
 use zbus::blocking::Connection;
 use zbus::zvariant::Value;
 
@@ -33,15 +36,103 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     if !available() {
         bail!("no way to start the background service on this system");
     }
-    portal_set_enabled(enabled)
+    portal_set_enabled(enabled)?;
+    if enabled {
+        restart()?;
+    } else {
+        stop()?;
+    }
+    Ok(())
 }
 
 /// Whether the daemon is up right now, used only to word the status message after a save.
-///
-/// The daemon is a separate Flatpak instance with no bus name of its own, so the recorded
-/// intent is the best answer available.
 pub fn is_running() -> bool {
-    is_enabled()
+    instance::is_held()
+}
+
+/// After a Flatpak reinstall the previous `powerdisplayd` often keeps running with the
+/// old `/app` mount. Opening the settings window replaces it so autoswitch matches the
+/// installed build.
+pub fn ensure_fresh_daemon() {
+    if !available() || !is_enabled() {
+        return;
+    }
+    std::thread::spawn(|| {
+        if let Err(err) = restart() {
+            tracing::warn!("could not start the background service: {err:#}");
+        }
+    });
+}
+
+pub fn restart() -> Result<()> {
+    stop()?;
+    std::thread::sleep(Duration::from_millis(300));
+    start()
+}
+
+pub fn stop() -> Result<()> {
+    let mut cmd = host_command("pkill", &["-x", "powerdisplayd"]);
+    let status = cmd.status().context("stopping powerdisplayd")?;
+    if status.success() || status.code() == Some(1) {
+        return Ok(());
+    }
+    bail!("pkill exited with {status}");
+}
+
+fn start() -> Result<()> {
+    let log_path = log_path()?;
+    if let Some(dir) = log_path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening {}", log_path.display()))?;
+
+    let mut cmd = if powerdisplay_core::sandboxed() {
+        let mut cmd = Command::new("flatpak-spawn");
+        cmd.args([
+            "--host",
+            "flatpak",
+            "run",
+            "--command=powerdisplayd",
+            instance::FLATPAK_ID,
+        ]);
+        cmd
+    } else {
+        Command::new("powerdisplayd")
+    };
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .context("starting powerdisplayd")?;
+    Ok(())
+}
+
+fn host_command(program: &str, args: &[&str]) -> Command {
+    if powerdisplay_core::sandboxed() {
+        let mut cmd = Command::new("flatpak-spawn");
+        cmd.arg("--host").arg(program).args(args);
+        cmd
+    } else {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        cmd
+    }
+}
+
+fn log_path() -> Result<PathBuf> {
+    let state = match std::env::var_os("XDG_STATE_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => {
+            let home = std::env::var_os("HOME").context("HOME is not set")?;
+            PathBuf::from(home).join(".local/state")
+        }
+    };
+    Ok(state.join("powerdisplayd.log"))
 }
 
 /// Records that autostart was requested.

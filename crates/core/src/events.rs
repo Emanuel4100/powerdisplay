@@ -25,6 +25,17 @@ pub enum Event {
     Resumed,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn charger_events_settle_faster_than_hotplug() {
+        assert!(Event::Power(PowerState::Ac).settle_delay() < Event::DisplaysChanged.settle_delay());
+        assert!(Event::ConfigChanged.settle_delay() < Event::Power(PowerState::Ac).settle_delay());
+    }
+}
+
 impl Event {
     /// How long to wait for the dust to settle before acting.
     ///

@@ -21,5 +21,5 @@ x11rb = { version = "0.14", features = ["randr"] }
 
 # Power source detection and config watching
 udev = { version = "0.9", features = ["send"] }
-rustix = { version = "1", features = ["event"] }
+rustix = { version = "1", features = ["event", "fs"] }
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }

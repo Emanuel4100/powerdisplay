@@ -1,5 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+thread_local! {
+    static DAEMON_REFRESHED: Cell<bool> = const { Cell::new(false) };
+}
 
 use gtk::prelude::*;
 use gtk::{
@@ -74,6 +78,12 @@ fn build_error(window: &ApplicationWindow, header: &HeaderBar, message: &str) {
 }
 
 fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
+    DAEMON_REFRESHED.with(|flag| {
+        if !flag.get() {
+            flag.set(true);
+            autostart::ensure_fresh_daemon();
+        }
+    });
     let engine = Rc::new(engine);
     let config = Rc::new(RefCell::new(Config::load().unwrap_or_default()));
     let power_profiles = engine.power_profiles();
