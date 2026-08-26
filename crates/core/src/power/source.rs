@@ -7,16 +7,20 @@
 use std::fs;
 use std::path::Path;
 use std::sync::mpsc::Sender;
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::Result;
 
 use crate::config::PowerState;
-use crate::watch::spawn_udev;
+use crate::watch;
 
 const SUPPLY_ROOT: &str = "/sys/class/power_supply";
-const RESYNC_INTERVAL: Duration = Duration::from_secs(60);
+/// Upper bound when udev never wakes us. A few tiny sysfs reads a second is nothing next
+/// to missing a charger event for a minute, which is what the Flatpak was doing.
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const UDEV_RESYNC: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SupplyReading {
@@ -87,18 +91,54 @@ pub fn classify(supplies: &[SupplyReading]) -> PowerState {
 }
 
 /// Sends the current state immediately, then again on every change.
+///
+/// Udev is the fast path. A short sysfs poll sits behind it because a Flatpak often never
+/// sees `power_supply` netlink messages — the socket is in the host network namespace and
+/// the udev database under `/run/udev` is not in the sandbox — and the previous 60-second
+/// resync felt like the app had simply stopped working.
 pub fn spawn_watcher(tx: Sender<PowerState>) -> Result<JoinHandle<()>> {
-    let mut last = read_state();
-    let _ = tx.send(last);
+    let last = Arc::new(Mutex::new(read_state()));
+    let _ = tx.send(locked_state(&last));
 
-    spawn_udev("power_supply", RESYNC_INTERVAL, move || {
-        let current = read_state();
-        if current == last {
-            return true;
+    let udev_last = last.clone();
+    let udev_tx = tx.clone();
+    match watch::spawn_kernel_uevents("power_supply", UDEV_RESYNC, move || {
+        publish(&udev_last, &udev_tx)
+    }) {
+        Ok(handle) => {
+            // The thread is the process's; dropping the handle detaches it.
+            drop(handle);
         }
-        last = current;
-        tx.send(current).is_ok()
-    })
+        Err(err) => tracing::warn!(
+            error = %err,
+            "no kernel uevents for the power supply; polling sysfs instead"
+        ),
+    }
+
+    let poll_last = last;
+    thread::Builder::new()
+        .name("power-poll".into())
+        .spawn(move || loop {
+            thread::sleep(POLL_INTERVAL);
+            if !publish(&poll_last, &tx) {
+                return;
+            }
+        })
+        .map_err(Into::into)
+}
+
+fn locked_state(last: &Mutex<PowerState>) -> PowerState {
+    *last.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn publish(last: &Mutex<PowerState>, tx: &Sender<PowerState>) -> bool {
+    let current = read_state();
+    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if current == *last {
+        return true;
+    }
+    *last = current;
+    tx.send(current).is_ok()
 }
 
 #[cfg(test)]

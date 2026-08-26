@@ -212,9 +212,13 @@ fn watch(engine: Engine, mut config: Config) -> Result<()> {
                 tracing::debug!(?event, "event");
                 match event {
                     Event::Power(new_state) => {
-                        if new_state != state {
-                            tracing::info!(state = new_state.label(), "power source changed");
+                        if new_state == state {
+                            // Watchers re-read on a timer. A duplicate must not restart
+                            // the debounce, or a 250ms poll would postpone the apply
+                            // forever by never letting the dust settle.
+                            continue;
                         }
+                        tracing::info!(state = new_state.label(), "power source changed");
                         state = new_state;
                     }
                     Event::ConfigChanged => match Config::load() {

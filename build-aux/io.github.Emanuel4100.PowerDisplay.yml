@@ -30,9 +30,11 @@ finish-args:
   - --device=dri
 
   # Power-supply events arrive over a udev netlink socket that only exists in the host's
-  # network namespace. Without this the daemon never hears the charger go in and is left
-  # re-reading /sys on its resync timer, which turns an instant switch into a slow one.
+  # network namespace. The daemon also polls sysfs, so a missed uevent is not fatal, but
+  # without this the switch waits for the next poll instead of the kernel's own event.
   - --share=network
+  # libudev looks up devices here; without it the userspace udev monitor is half-blind.
+  - --filesystem=/run/udev:ro
 
   # Reading and setting the display layout, one name per desktop we support.
   - --talk-name=org.gnome.Mutter.DisplayConfig

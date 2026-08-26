@@ -57,8 +57,9 @@ A few things about the sandbox are load-bearing rather than decorative:
   window keeps its own note of the setting.
 - **`--share=network` is required**, for an app that otherwise never touches the network.
   udev delivers power-supply events over a netlink socket that only exists in the host's
-  network namespace. Without it the daemon still works, but it notices the charger on its
-  next resync rather than immediately.
+  network namespace. The daemon also re-reads `/sys/class/power_supply` several times a
+  second, so a missed uevent still switches within a fraction of a second rather than
+  waiting for a long resync.
 - **Plasma needs `--talk-name=org.freedesktop.Flatpak`**, because `kscreen-doctor` belongs
   to the desktop and lives on the host. That permission allows running host commands in
   general, which is close to no sandbox at all. Delete that line from the manifest if you
@@ -153,10 +154,11 @@ The window and the daemon never talk to each other directly. The window writes t
 file, the daemon watches it. Closing the window changes nothing about the automation, and
 the resident process carries no GUI toolkit with it.
 
-Power source detection reads `/sys/class/power_supply` and is woken by udev rather than by
-polling, so an idle laptop stays idle. It accounts for USB-C charging (which reports
-through a `USB` supply rather than `Mains`) and for batteries parked at a charge limit
-(which report `Not charging` rather than `Charging`).
+Power source detection reads `/sys/class/power_supply`. It is woken by kernel uevents when
+those arrive, and it re-reads the same files several times a second so a Flatpak that never
+sees udev still switches as soon as the kernel updates `online`. It accounts for USB-C
+charging (which reports through a `USB` supply rather than `Mains`) and for batteries
+parked at a charge limit (which report `Not charging` rather than `Charging`).
 
 Changes are debounced: docks and chargers produce a burst of events over a second or two,
 and one settled mode switch is much better than four in a row.
