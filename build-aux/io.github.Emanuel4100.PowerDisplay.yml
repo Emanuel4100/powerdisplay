@@ -65,6 +65,8 @@ modules:
         /app/share/applications/$FLATPAK_ID.desktop
       - install -Dm644 data/$FLATPAK_ID.svg
         /app/share/icons/hicolor/scalable/apps/$FLATPAK_ID.svg
+      - install -Dm644 data/$FLATPAK_ID-symbolic.svg
+        /app/share/icons/hicolor/symbolic/apps/$FLATPAK_ID-symbolic.svg
       - install -Dm644 data/$FLATPAK_ID.metainfo.xml
         /app/share/metainfo/$FLATPAK_ID.metainfo.xml
     sources:

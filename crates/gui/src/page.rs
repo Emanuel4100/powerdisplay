@@ -168,12 +168,66 @@ impl OutputRow {
 }
 
 fn resolution_label(group: &ResolutionGroup) -> String {
-    let base = format!("{} × {}", group.width, group.height);
+    let ratio = aspect_ratio(group.width, group.height);
     if group.preferred {
-        format!("{base}  (native)")
+        format!(
+            "{} × {}  ({ratio}, native)",
+            group.width, group.height
+        )
     } else {
-        base
+        format!("{} × {}  ({ratio})", group.width, group.height)
     }
+}
+
+fn aspect_ratio(width: u32, height: u32) -> String {
+    if width == 0 || height == 0 {
+        return "?".into();
+    }
+
+    let landscape = width >= height;
+    let (long, short) = if landscape {
+        (width, height)
+    } else {
+        (height, width)
+    };
+    let value = long as f64 / short as f64;
+
+    // Snap to the names people actually use. 1366×768 is not 683:384.
+    const KNOWN: &[(u32, u32)] = &[
+        (32, 9),
+        (21, 9),
+        (16, 9),
+        (16, 10),
+        (3, 2),
+        (4, 3),
+        (5, 4),
+        (1, 1),
+    ];
+
+    for &(a, b) in KNOWN {
+        let target = a as f64 / b as f64;
+        if (value - target).abs() / target < 0.03 {
+            return if landscape {
+                format!("{a}:{b}")
+            } else {
+                format!("{b}:{a}")
+            };
+        }
+    }
+
+    let g = gcd(long, short);
+    if landscape {
+        format!("{}:{}", long / g, short / g)
+    } else {
+        format!("{}:{}", short / g, long / g)
+    }
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 fn fill_refresh(
@@ -390,5 +444,22 @@ fn pretty_profile(name: &str) -> String {
             }
             chars
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::aspect_ratio;
+
+    #[test]
+    fn common_panels_use_the_names_people_expect() {
+        assert_eq!(aspect_ratio(1920, 1080), "16:9");
+        assert_eq!(aspect_ratio(2880, 1800), "16:10");
+        assert_eq!(aspect_ratio(2560, 1600), "16:10");
+        assert_eq!(aspect_ratio(1366, 768), "16:9");
+        assert_eq!(aspect_ratio(3840, 2160), "16:9");
+        assert_eq!(aspect_ratio(2560, 1080), "21:9");
+        assert_eq!(aspect_ratio(3440, 1440), "21:9");
+        assert_eq!(aspect_ratio(1080, 1920), "9:16");
     }
 }
