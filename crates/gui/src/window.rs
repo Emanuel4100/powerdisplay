@@ -85,8 +85,13 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
 
     let stack = Stack::builder()
         .transition_type(gtk::StackTransitionType::SlideLeftRight)
+        .vhomogeneous(false)
         .build();
-    header.set_title_widget(Some(&StackSwitcher::builder().stack(&stack).build()));
+    let switcher = StackSwitcher::builder()
+        .stack(&stack)
+        .css_classes(["pd-switcher"])
+        .build();
+    header.set_title_widget(Some(&switcher));
 
     let status = Label::new(None);
     status.add_css_class("pd-status");
@@ -105,18 +110,23 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
         }
     });
 
+    let persist_hint = persist_hint(engine.backend_name(), engine.supports_persist());
     let battery = Rc::new(ProfilePage::build(
+        "On battery",
         &config.borrow().on_battery,
         &outputs,
         &power_profiles,
         engine.supports_persist(),
+        persist_hint,
         on_change.clone(),
     ));
     let ac = Rc::new(ProfilePage::build(
+        "Plugged in",
         &config.borrow().on_ac,
         &outputs,
         &power_profiles,
         engine.supports_persist(),
+        persist_hint,
         on_change.clone(),
     ));
 
@@ -220,6 +230,8 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
     content.append(&footer);
 
     window.set_child(Some(&content));
+    // Hug the cards instead of opening at 700px of empty window.
+    window.set_default_size(680, -1);
 
     if let Some(err) = enumeration_error {
         set_status(&status, &format!("Could not list displays: {err}"), true);
@@ -277,6 +289,16 @@ fn menu_button(window: &ApplicationWindow, engine: &Rc<Engine>, state: PowerStat
         .popover(&popover)
         .tooltip_text("Options")
         .build()
+}
+
+fn persist_hint(backend: &str, supports_persist: bool) -> &'static str {
+    if supports_persist {
+        "Off: the change is temporary and your saved display settings are left alone"
+    } else if backend.starts_with("GNOME") {
+        "GNOME would show a Keep changes? countdown and revert after 20 seconds if you don't confirm, so automatic switching has to stay temporary"
+    } else {
+        "This desktop always remembers display changes"
+    }
 }
 
 fn set_status(status: &Label, message: &str, is_error: bool) {

@@ -51,8 +51,8 @@ fn build_ui(app: &Application) {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("powerdisplay")
-        .default_width(900)
-        .default_height(700)
+        .default_width(680)
+        .default_height(-1)
         .build();
 
     window.set_icon_name(Some(APP_ID));

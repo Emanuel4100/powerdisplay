@@ -231,14 +231,23 @@ pub struct ProfilePage {
 
 impl ProfilePage {
     pub fn build(
+        title: &str,
         profile: &Profile,
         outputs: &[Output],
         power_profiles: &[String],
         supports_persist: bool,
+        persist_hint: &str,
         on_change: Rc<dyn Fn()>,
     ) -> Self {
         let content = GtkBox::new(Orientation::Vertical, 18);
         content.add_css_class("pd-page");
+
+        let heading = Label::new(Some(title));
+        heading.add_css_class("pd-page-title");
+        heading.set_xalign(0.0);
+        heading.set_halign(Align::Start);
+        heading.set_wrap(true);
+        content.append(&heading);
 
         // Performance card
         let performance = card("Performance");
@@ -311,13 +320,9 @@ impl ProfilePage {
         }
 
         let persist = CheckButton::with_label("Remember this layout in the desktop's display settings");
-        persist.set_active(profile.persist_display_config);
+        persist.set_active(profile.persist_display_config && supports_persist);
         persist.set_sensitive(supports_persist);
-        persist.set_tooltip_text(Some(if supports_persist {
-            "Off: the change is temporary and your saved display settings are left alone"
-        } else {
-            "This desktop always remembers display changes"
-        }));
+        persist.set_tooltip_text(Some(persist_hint));
         persist.connect_toggled({
             let on_change = on_change.clone();
             move |_| on_change()
@@ -328,7 +333,11 @@ impl ProfilePage {
 
         let root = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .vexpand(true)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .propagate_natural_width(true)
+            .max_content_height(720)
+            .hexpand(true)
             .child(&content)
             .build();
 
