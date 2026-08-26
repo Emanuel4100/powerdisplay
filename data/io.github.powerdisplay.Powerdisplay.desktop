@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Power Display
+GenericName=Display Power Profiles
+Comment=Change resolution, refresh rate and performance mode when you plug in or unplug
+Exec=powerdisplay
+Icon=io.github.powerdisplay.Powerdisplay
+Terminal=false
+Categories=Settings;HardwareSettings;GTK;
+Keywords=display;monitor;resolution;refresh;rate;battery;power;performance;
+StartupNotify=true

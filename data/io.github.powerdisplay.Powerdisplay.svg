@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="10" y="20" width="108" height="72" rx="8" fill="#3d3846"/>
+  <rect x="18" y="28" width="92" height="56" rx="4" fill="url(#screen)"/>
+  <rect x="52" y="92" width="24" height="12" fill="#3d3846"/>
+  <rect x="36" y="102" width="56" height="8" rx="4" fill="#3d3846"/>
+
+  <!-- Battery/charge mark, the thing that drives the switch. -->
+  <path d="M70 34 L48 62 L62 62 L56 80 L80 50 L64 50 Z" fill="#f9f06b" stroke="#3d3846" stroke-width="3" stroke-linejoin="round"/>
+</svg>

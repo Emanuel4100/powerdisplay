@@ -1,0 +1,49 @@
+/* Styling is deliberately expressed with alpha(currentColor, ...) rather than named
+   theme colours: powerdisplay is meant to look the same under Adwaita, Breeze and the
+   minimal themes shipped by tiling window managers, and only a handful of themes define
+   the @named colours GNOME applications usually lean on. */
+
+.pd-card {
+  background-color: alpha(currentColor, 0.04);
+  border: 1px solid alpha(currentColor, 0.09);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.pd-section-title {
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.pd-output-name {
+  font-weight: 600;
+}
+
+.pd-dim {
+  opacity: 0.6;
+}
+
+.pd-status {
+  opacity: 0.8;
+}
+
+.pd-status.pd-error {
+  opacity: 1;
+  color: #e01b24;
+}
+
+.pd-badge {
+  background-color: alpha(currentColor, 0.09);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 0.85em;
+}
+
+.pd-page {
+  padding: 18px;
+}
+
+.pd-empty {
+  opacity: 0.7;
+  padding: 24px;
+}

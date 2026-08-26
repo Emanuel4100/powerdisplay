@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/daemon", "crates/gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/emanuel/powerdisplay"
+
+[workspace.dependencies]
+powerdisplay-core = { path = "crates/core" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true

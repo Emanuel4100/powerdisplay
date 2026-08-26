@@ -1,0 +1,17 @@
+[package]
+name = "powerdisplay-daemon"
+description = "Background service that switches display mode and power profile with the AC adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "powerdisplayd"
+path = "src/main.rs"
+
+[dependencies]
+powerdisplay-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

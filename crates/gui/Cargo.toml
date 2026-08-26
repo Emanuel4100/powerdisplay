@@ -1,0 +1,18 @@
+[package]
+name = "powerdisplay-gui"
+description = "GTK4 front-end for powerdisplay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "powerdisplay"
+path = "src/main.rs"
+
+[dependencies]
+powerdisplay-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gtk = { version = "0.10", package = "gtk4" }
