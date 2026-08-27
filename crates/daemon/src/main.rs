@@ -15,6 +15,9 @@ use powerdisplay_core::events::{Event, EventSources};
 use powerdisplay_core::power;
 use powerdisplay_core::{Controller, instance, sandbox};
 
+/// How often to check that GNOME Software (or `flatpak uninstall`) has not removed us.
+const UNINSTALL_POLL: Duration = Duration::from_secs(5);
+
 const USAGE: &str = "\
 powerdisplayd - apply a display mode and power profile based on the power source
 
@@ -223,6 +226,11 @@ fn watch(engine: Engine, config: Config) -> Result<()> {
     let mut controller = Controller::new(config, power::read_state(), Instant::now());
 
     loop {
+        if !instance::app_still_installed() {
+            instance::cleanup_after_uninstall();
+            return Ok(());
+        }
+
         // Apply *before* reading the next event. After our own mode set, DRM udev events
         // keep arriving; a `recv_timeout(0)` on a non-empty channel would starve the
         // timeout branch and never apply again — which is how GNOME's saved 60 Hz layout
@@ -235,10 +243,11 @@ fn watch(engine: Engine, config: Config) -> Result<()> {
             continue;
         }
 
-        let received = match controller.wait(Instant::now()) {
-            Some(timeout) => sources.rx.recv_timeout(timeout),
-            None => sources.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        let wait = match controller.wait(Instant::now()) {
+            Some(timeout) => timeout.min(UNINSTALL_POLL),
+            None => UNINSTALL_POLL,
         };
+        let received = sources.rx.recv_timeout(wait);
 
         match received {
             Ok(event) => {

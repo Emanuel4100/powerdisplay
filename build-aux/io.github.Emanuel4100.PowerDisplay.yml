@@ -35,6 +35,10 @@ finish-args:
   - --share=network
   # libudev looks up devices here; without it the userspace udev monitor is half-blind.
   - --filesystem=/run/udev:ro
+  # Host autostart file. The portal writes one, but Software uninstall does not delete
+  # it or stop powerdisplayd. We replace Exec with a wrapper that no-ops if the app is
+  # gone, and the daemon deletes the file when it notices the uninstall.
+  - --filesystem=xdg-config/autostart:create
 
   # Reading and setting the display layout, one name per desktop we support.
   - --talk-name=org.gnome.Mutter.DisplayConfig

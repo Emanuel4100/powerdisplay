@@ -22,8 +22,12 @@ Removes powerdisplay and powerdisplayd installed by the old install.sh.
   --purge        Also delete ~/.config/powerdisplay. Leave this off if you
                  still want a copy of the profiles.
 
-A Flatpak install is not touched. Remove that with:
-  flatpak uninstall --user io.github.Emanuel4100.PowerDisplay
+A Flatpak install is not touched by this script. Remove that from Software, or:
+  flatpak uninstall --user --delete-data io.github.Emanuel4100.PowerDisplay
+
+The background service notices the uninstall within a few seconds, exits, and
+deletes its login autostart entry. Tick Delete application data in Software
+(or pass --delete-data) to wipe saved profiles too.
 EOF
 }
 

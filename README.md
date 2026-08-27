@@ -6,10 +6,23 @@ Works on GNOME, KDE, Sway/Hyprland and most X11 desktops. No root.
 
 ## Install
 
+x86_64 only for the prebuilt bundle. Needs `org.gnome.Platform` 50, not the SDK.
+
 ```bash
-flatpak install --user org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
-flatpak-builder --user --install --force-clean \
-    build-aux/build build-aux/io.github.Emanuel4100.PowerDisplay.yml
+./install.sh
+```
+
+Or download [powerdisplay-x86_64.flatpak](https://github.com/Emanuel4100/powerdisplay/releases/latest/download/powerdisplay-x86_64.flatpak) and:
+
+```bash
+flatpak install --user org.gnome.Platform//50
+flatpak install --user ./powerdisplay-x86_64.flatpak
+```
+
+Uninstall from Software. That stops the background service and drops the login autostart entry. Tick **Delete application data** if you also want the saved profiles gone, or:
+
+```bash
+flatpak uninstall --user --delete-data io.github.Emanuel4100.PowerDisplay
 ```
 
 ## Use
@@ -80,5 +93,22 @@ build-aux/test-sandbox.sh
 - GNOME, KDE (via `kscreen-doctor`), wlroots compositors, and X11 (RandR).
 - Performance modes need `power-profiles-daemon` or `tuned-ppd`. Display switching still works without them.
 - After changing `Cargo.lock`, run `build-aux/update-cargo-sources.sh`.
+
+## Build from source
+
+Needs the GNOME 50 SDK and the Rust extension. Produces the same app as the prebuilt bundle.
+
+```bash
+flatpak install --user org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak-builder --user --install --force-clean \
+    build-aux/build build-aux/io.github.Emanuel4100.PowerDisplay.yml
+```
+
+To export a `.flatpak` for `./install.sh` without uploading a release:
+
+```bash
+build-aux/export-bundle.sh
+./install.sh
+```
 
 GPL-3.0-or-later.

@@ -234,6 +234,7 @@ pub fn format_report(report: &Report) -> String {
 pub const REQUIRED_FLATPAK_FINISH_ARGS: &[&str] = &[
     "--share=network",
     "--filesystem=/run/udev:ro",
+    "--filesystem=xdg-config/autostart:create",
     "--talk-name=org.gnome.Mutter.DisplayConfig",
     "--system-talk-name=org.freedesktop.UPower.PowerProfiles",
     "--system-talk-name=net.hadess.PowerProfiles",
@@ -257,6 +258,9 @@ pub fn missing_installed_permissions(text: &str) -> Vec<&'static str> {
     }
     if !text.contains("/run/udev") {
         missing.push("filesystem=/run/udev:ro");
+    }
+    if !text.contains("xdg-config/autostart") {
+        missing.push("filesystem=xdg-config/autostart");
     }
     if !text.contains("org.gnome.Mutter.DisplayConfig") {
         missing.push("talk-name=org.gnome.Mutter.DisplayConfig");
@@ -291,7 +295,7 @@ mod tests {
 shared=ipc;network;
 sockets=fallback-x11;wayland;
 devices=dri;
-filesystems=/run/udev:ro;
+filesystems=/run/udev:ro;xdg-config/autostart;
 
 [Session Bus Policy]
 org.gnome.Mutter.DisplayConfig=talk

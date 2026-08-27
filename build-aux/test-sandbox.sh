@@ -15,6 +15,7 @@ echo "==> Flatpak manifest permissions"
 for arg in \
     --share=network \
     --filesystem=/run/udev:ro \
+    --filesystem=xdg-config/autostart:create \
     --talk-name=org.gnome.Mutter.DisplayConfig \
     --system-talk-name=org.freedesktop.UPower.PowerProfiles \
     --system-talk-name=net.hadess.PowerProfiles \

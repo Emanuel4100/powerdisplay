@@ -152,14 +152,18 @@ fn portal_set_enabled(enabled: bool) -> Result<()> {
     }
 
     let marker = marker_path()?;
-    if granted {
+    if enabled {
         if let Some(dir) = marker.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
-    } else if marker.exists() {
-        std::fs::remove_file(&marker)
-            .with_context(|| format!("removing {}", marker.display()))?;
+        instance::write_host_autostart()?;
+    } else {
+        if marker.exists() {
+            std::fs::remove_file(&marker)
+                .with_context(|| format!("removing {}", marker.display()))?;
+        }
+        instance::remove_host_autostart();
     }
 
     Ok(())
