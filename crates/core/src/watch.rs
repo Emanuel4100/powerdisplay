@@ -17,6 +17,19 @@ pub enum UdevSource {
     Kernel,
 }
 
+/// Why the watcher called back.
+///
+/// Callers need to tell these apart to know whether netlink is actually delivering: a
+/// resync fires on a silent socket just the same, so counting it as delivery would let a
+/// watcher that never hears anything claim it is working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wake {
+    /// A matching uevent arrived.
+    Uevent,
+    /// Nothing arrived within the resync interval, so re-read anyway.
+    Resync,
+}
+
 /// Runs `on_event` whenever the kernel reports a change in `subsystem`, and at least once
 /// every `resync` even if nothing was reported. Returning `false` from the callback stops
 /// the thread.
@@ -26,7 +39,7 @@ pub enum UdevSource {
 pub fn spawn_udev(
     subsystem: &'static str,
     resync: Duration,
-    on_event: impl FnMut() -> bool + Send + 'static,
+    on_event: impl FnMut(Wake) -> bool + Send + 'static,
 ) -> Result<JoinHandle<()>> {
     spawn_uevent_monitor(UdevSource::Userspace, subsystem, resync, on_event)
 }
@@ -34,7 +47,7 @@ pub fn spawn_udev(
 pub fn spawn_kernel_uevents(
     subsystem: &'static str,
     resync: Duration,
-    on_event: impl FnMut() -> bool + Send + 'static,
+    on_event: impl FnMut(Wake) -> bool + Send + 'static,
 ) -> Result<JoinHandle<()>> {
     spawn_uevent_monitor(UdevSource::Kernel, subsystem, resync, on_event)
 }
@@ -60,7 +73,7 @@ fn spawn_uevent_monitor(
     source: UdevSource,
     subsystem: &'static str,
     resync: Duration,
-    mut on_event: impl FnMut() -> bool + Send + 'static,
+    mut on_event: impl FnMut(Wake) -> bool + Send + 'static,
 ) -> Result<JoinHandle<()>> {
     let builder = match source {
         UdevSource::Userspace => udev::MonitorBuilder::new().context("creating a udev monitor")?,
@@ -107,7 +120,8 @@ fn spawn_uevent_monitor(
                     continue;
                 }
 
-                if !on_event() {
+                let wake = if matched > 0 { Wake::Uevent } else { Wake::Resync };
+                if !on_event(wake) {
                     return;
                 }
             }

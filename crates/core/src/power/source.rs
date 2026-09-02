@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -14,12 +15,25 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::config::PowerState;
-use crate::watch;
+use crate::watch::{self, Wake};
 
 const SUPPLY_ROOT: &str = "/sys/class/power_supply";
-/// Upper bound when udev never wakes us. A few tiny sysfs reads a second is nothing next
-/// to missing a charger event for a minute, which is what the Flatpak was doing.
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Rate while it is still unknown whether netlink reaches us. A Flatpak often never sees
+/// `power_supply` uevents, and missing a charger event for a minute is what made the app
+/// look like it had stopped working.
+///
+/// This does not need to be fast to feel fast. A confirmed change still waits
+/// [`crate::events::Event::settle_delay`] — 1.5 seconds — before anything is applied, so
+/// spotting it a fraction of a second sooner is invisible, while polling sysfs four times
+/// a second is a strange thing for a power tool to be doing all day.
+const UNPROVEN_POLL: Duration = Duration::from_secs(1);
+/// Once a uevent has actually arrived, the poll is only a safety net behind it.
+const PROVEN_POLL: Duration = Duration::from_secs(5);
+/// How long to wait before re-reading a supply that disagrees with the last announcement.
+///
+/// Confirmation is deliberately not "wait for the next tick": tying it to the poll
+/// interval would mean every slowdown of the poll also slowed down every real change.
+const CONFIRM_DELAY: Duration = Duration::from_millis(120);
 const UDEV_RESYNC: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,10 +153,22 @@ pub fn spawn_watcher(tx: Sender<PowerState>) -> Result<JoinHandle<()>> {
     let last = Arc::new(Mutex::new(DebouncedState::new(read_state())));
     let _ = tx.send(locked_published(&last));
 
+    // Set only by a real uevent, never by a resync, so a socket that stays silent keeps
+    // the fast poll.
+    let uevents_arrive = Arc::new(AtomicBool::new(false));
+
     let udev_last = last.clone();
     let udev_tx = tx.clone();
-    match watch::spawn_kernel_uevents("power_supply", UDEV_RESYNC, move || {
-        publish(&udev_last, &udev_tx)
+    let udev_alive = uevents_arrive.clone();
+    match watch::spawn_kernel_uevents("power_supply", UDEV_RESYNC, move |wake| {
+        let confirm = match wake {
+            Wake::Uevent => {
+                udev_alive.store(true, Ordering::Relaxed);
+                Some(CONFIRM_DELAY)
+            }
+            Wake::Resync => None,
+        };
+        publish(&udev_last, &udev_tx, confirm)
     }) {
         Ok(handle) => {
             // The thread is the process's; dropping the handle detaches it.
@@ -157,10 +183,17 @@ pub fn spawn_watcher(tx: Sender<PowerState>) -> Result<JoinHandle<()>> {
     let poll_last = last;
     thread::Builder::new()
         .name("power-poll".into())
-        .spawn(move || loop {
-            thread::sleep(POLL_INTERVAL);
-            if !publish(&poll_last, &tx) {
-                return;
+        .spawn(move || {
+            loop {
+                let interval = if uevents_arrive.load(Ordering::Relaxed) {
+                    PROVEN_POLL
+                } else {
+                    UNPROVEN_POLL
+                };
+                thread::sleep(interval);
+                if !publish(&poll_last, &tx, Some(CONFIRM_DELAY)) {
+                    return;
+                }
             }
         })
         .map_err(Into::into)
@@ -172,10 +205,38 @@ fn locked_published(last: &Mutex<DebouncedState>) -> PowerState {
         .published()
 }
 
-fn publish(last: &Mutex<DebouncedState>, tx: &Sender<PowerState>) -> bool {
+fn observe(last: &Mutex<DebouncedState>, current: PowerState) -> Option<PowerState> {
+    last.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .observe(current)
+}
+
+/// Reads the supplies and announces a confirmed change.
+///
+/// `confirm` is how long to wait before re-reading when the first reading disagrees with
+/// what was last announced; `None` leaves the reading as a candidate for whoever looks
+/// next. Both watchers confirm for themselves, so a change is settled in
+/// [`CONFIRM_DELAY`] however slowly the poll happens to be running.
+fn publish(
+    last: &Mutex<DebouncedState>,
+    tx: &Sender<PowerState>,
+    confirm: Option<Duration>,
+) -> bool {
     let current = read_state();
-    let mut last = last.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    match last.observe(current) {
+    if current == locked_published(last) {
+        observe(last, current);
+        return true;
+    }
+
+    if let Some(state) = observe(last, current) {
+        return tx.send(state).is_ok();
+    }
+
+    let Some(delay) = confirm else {
+        return true;
+    };
+    thread::sleep(delay);
+    match observe(last, read_state()) {
         Some(state) => tx.send(state).is_ok(),
         None => true,
     }
@@ -267,5 +328,78 @@ mod tests {
         assert_eq!(state.observe(PowerState::Battery), None);
         assert_eq!(state.observe(PowerState::Battery), Some(PowerState::Battery));
         assert_eq!(state.published(), PowerState::Battery);
+    }
+
+    /// A reading that comes back to where it started must not leave a stale candidate
+    /// behind, or the next glitch in that direction would publish on its first sighting.
+    #[test]
+    fn a_reading_that_returns_to_normal_clears_the_candidate() {
+        let mut state = DebouncedState::new(PowerState::Ac);
+        assert_eq!(state.observe(PowerState::Battery), None);
+        assert_eq!(state.observe(PowerState::Ac), None);
+        assert_eq!(state.observe(PowerState::Battery), None);
+        assert_eq!(state.published(), PowerState::Ac);
+    }
+
+    fn fake_supplies(name: &str, supplies: &[(&str, &[(&str, &str)])]) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "powerdisplay-supplies-{}-{name}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        for (supply, files) in supplies {
+            let dir = root.join(supply);
+            fs::create_dir_all(&dir).unwrap();
+            for (file, value) in *files {
+                fs::write(dir.join(file), value).unwrap();
+            }
+        }
+        root
+    }
+
+    #[test]
+    fn sysfs_readings_are_parsed_into_supplies() {
+        let root = fake_supplies(
+            "parsed",
+            &[
+                ("AC", &[("type", "Mains\n"), ("online", "1\n")]),
+                (
+                    "BAT0",
+                    &[("type", "Battery\n"), ("status", "Not charging\n")],
+                ),
+            ],
+        );
+
+        let mut supplies = read_supplies_at(&root);
+        supplies.sort_by(|a, b| a.kind.cmp(&b.kind));
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(supplies.len(), 2);
+        assert_eq!(supplies[0].kind, "Battery");
+        assert_eq!(supplies[0].status.as_deref(), Some("Not charging"));
+        assert_eq!(supplies[0].online, None);
+        assert_eq!(supplies[1].kind, "Mains");
+        assert_eq!(supplies[1].online, Some(true));
+        assert_eq!(classify(&supplies), PowerState::Ac);
+    }
+
+    /// `/sys/class/power_supply` also holds things with no `type` at all, and a missing
+    /// directory is what a container without sysfs looks like.
+    #[test]
+    fn unreadable_entries_are_skipped_rather_than_guessed_at() {
+        let root = fake_supplies(
+            "partial",
+            &[
+                ("weird", &[("capacity", "50\n")]),
+                ("AC", &[("type", "Mains\n"), ("online", "0\n")]),
+            ],
+        );
+
+        let supplies = read_supplies_at(&root);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(supplies.len(), 1);
+        assert_eq!(supplies[0].kind, "Mains");
+        assert!(read_supplies_at(Path::new("/definitely/not/here")).is_empty());
     }
 }

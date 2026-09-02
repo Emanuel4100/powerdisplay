@@ -74,6 +74,39 @@
   </branding>
 
   <releases>
+    <release version="0.1.1" date="2026-09-02">
+      <description>
+        <p>A bug-fix release, mostly about not losing your settings.</p>
+        <ul>
+          <li>
+            Settings that could not be read are no longer quietly replaced with the
+            defaults. The window says what went wrong and asks before overwriting them.
+          </li>
+          <li>
+            Saving no longer drops the settings for a monitor that is unplugged, or for
+            one that reports no modes.
+          </li>
+          <li>
+            A display change that the desktop refuses, which happens while the screen is
+            locked, is now retried instead of being abandoned until the next time the
+            charger is touched.
+          </li>
+          <li>
+            The settings window and the background service now always agree on which rule
+            belongs to which monitor.
+          </li>
+          <li>
+            Turning automatic switching on no longer occasionally leaves nothing running.
+          </li>
+          <li>
+            Around ten times less work while idle. The charger check no longer reads the
+            battery four times a second, and the uninstall check no longer starts a
+            process every five seconds. Switching is just as quick.
+          </li>
+        </ul>
+      </description>
+    </release>
+
     <release version="0.1.0" date="2026-08-27">
       <description>
         <p>First release.</p>

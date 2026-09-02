@@ -245,6 +245,82 @@ pub fn detect() -> Result<Box<dyn DisplayBackend>> {
     )
 }
 
+/// Which rule drives which display.
+pub struct Assignment {
+    /// Index into the rule list for each output, in the same order as the outputs given.
+    pub by_output: Vec<Option<usize>>,
+    pub warnings: Vec<String>,
+}
+
+impl Assignment {
+    /// The rule bound to `outputs[index]`, if any.
+    pub fn rule_for<'a>(
+        &self,
+        index: usize,
+        rules: &'a [crate::config::OutputRule],
+    ) -> Option<&'a crate::config::OutputRule> {
+        rules.get(self.by_output.get(index).copied().flatten()?)
+    }
+
+    /// Rules that ended up driving nothing, because no connected display matched them or
+    /// because another rule already claimed the one that did.
+    pub fn unassigned(&self, rule_count: usize) -> Vec<usize> {
+        (0..rule_count)
+            .filter(|index| !self.by_output.contains(&Some(*index)))
+            .collect()
+    }
+}
+
+/// Decides which display each rule refers to.
+///
+/// The settings window and the daemon must agree on this or the window will show a rule
+/// against one monitor and the daemon will apply it to another, so both go through here
+/// rather than each doing their own matching.
+pub fn assign_rules(rules: &[crate::config::OutputRule], outputs: &[Output]) -> Assignment {
+    let mut by_output: Vec<Option<usize>> = vec![None; outputs.len()];
+    let mut warnings = Vec::new();
+
+    for (rule_index, rule) in rules.iter().enumerate() {
+        // A rule with no mode leaves its display alone, so it is worth binding for the
+        // window's sake but not worth complaining about when it matches nothing.
+        let actionable = rule.mode.as_deref().is_some_and(|mode| !mode.is_empty());
+
+        let best = outputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, output)| {
+                rule.matcher
+                    .score(&output.connector, &output.make, &output.model, &output.serial)
+                    .map(|score| (score, index))
+            })
+            .max_by_key(|(score, _)| *score);
+
+        let Some((_, index)) = best else {
+            if actionable {
+                warnings.push(format!("no connected display matches {:?}", rule.matcher));
+            }
+            continue;
+        };
+
+        if by_output[index].is_some() {
+            if actionable {
+                warnings.push(format!(
+                    "{} is targeted by more than one rule; keeping the first",
+                    outputs[index].connector
+                ));
+            }
+            continue;
+        }
+
+        by_output[index] = Some(rule_index);
+    }
+
+    Assignment {
+        by_output,
+        warnings,
+    }
+}
+
 /// Turns config rules into concrete instructions for the backend.
 ///
 /// Rules that match nothing, or ask for a mode the panel cannot do, are reported instead
@@ -254,36 +330,17 @@ pub fn resolve_settings(
     rules: &[crate::config::OutputRule],
     outputs: &[Output],
 ) -> (Vec<OutputSetting>, Vec<String>) {
+    let mut assignment = assign_rules(rules, outputs);
+    let mut warnings = std::mem::take(&mut assignment.warnings);
     let mut settings = Vec::new();
-    let mut warnings = Vec::new();
 
-    for rule in rules {
+    for (index, output) in outputs.iter().enumerate() {
+        let Some(rule) = assignment.rule_for(index, rules) else {
+            continue;
+        };
         let Some(wanted) = rule.mode.as_deref().filter(|m| !m.is_empty()) else {
             continue;
         };
-
-        let best = outputs
-            .iter()
-            .filter_map(|o| {
-                rule.matcher
-                    .score(&o.connector, &o.make, &o.model, &o.serial)
-                    .map(|score| (score, o))
-            })
-            .max_by_key(|(score, _)| *score)
-            .map(|(_, output)| output);
-
-        let Some(output) = best else {
-            warnings.push(format!("no connected display matches {:?}", rule.matcher));
-            continue;
-        };
-
-        if settings.iter().any(|s: &OutputSetting| s.connector == output.connector) {
-            warnings.push(format!(
-                "{} is targeted by more than one rule; keeping the first",
-                output.connector
-            ));
-            continue;
-        }
 
         match output.resolve_mode(wanted) {
             Some(mode) => settings.push(OutputSetting {
@@ -409,6 +466,115 @@ mod tests {
         assert_eq!(settings.len(), 1);
         assert_eq!(settings[0].connector, "eDP-1");
         assert_eq!(warnings.len(), 2);
+    }
+
+    /// The window asks "which rule drives this display" and the daemon asks "which display
+    /// does this rule drive". Answering the first with a plain first-match bound one rule
+    /// to two rows, and saving then wrote a rule per row.
+    #[test]
+    fn one_rule_never_drives_two_displays() {
+        let mut first = test_output("DP-1", &[(1920, 1080, 60.0)]);
+        first.make = "Dell".into();
+        let mut second = test_output("DP-2", &[(1920, 1080, 60.0)]);
+        second.make = "Dell".into();
+        let outputs = vec![first, second];
+
+        let rules = vec![OutputRule {
+            matcher: OutputMatch {
+                make: Some("Dell".into()),
+                ..Default::default()
+            },
+            mode: Some("1920x1080@60.000".into()),
+        }];
+
+        let assignment = assign_rules(&rules, &outputs);
+        assert_eq!(
+            assignment.by_output.iter().filter(|rule| rule.is_some()).count(),
+            1
+        );
+
+        let (settings, _) = resolve_settings(&rules, &outputs);
+        assert_eq!(settings.len(), 1);
+
+        let window_choice = assignment
+            .by_output
+            .iter()
+            .position(|rule| *rule == Some(0))
+            .map(|index| outputs[index].connector.as_str());
+        assert_eq!(window_choice, Some(settings[0].connector.as_str()));
+    }
+
+    /// The window keeps these rather than dropping them, so unplugging a monitor and
+    /// saving does not erase its settings.
+    #[test]
+    fn rules_for_absent_displays_are_reported_as_unassigned() {
+        let outputs = vec![test_output("eDP-1", &[(1920, 1080, 60.0)])];
+        let rules = vec![
+            OutputRule {
+                matcher: OutputMatch {
+                    connector: Some("eDP-1".into()),
+                    ..Default::default()
+                },
+                mode: Some("1920x1080@60.000".into()),
+            },
+            OutputRule {
+                matcher: OutputMatch {
+                    connector: Some("HDMI-A-1".into()),
+                    ..Default::default()
+                },
+                mode: Some("3840x2160@60.000".into()),
+            },
+        ];
+
+        let assignment = assign_rules(&rules, &outputs);
+        assert_eq!(assignment.rule_for(0, &rules), Some(&rules[0]));
+        assert_eq!(assignment.unassigned(rules.len()), vec![1]);
+    }
+
+    /// The window rebuilds the rule list from the rows it drew plus the unassigned ones.
+    /// If those two sets ever overlapped it would duplicate a rule, and if they ever left
+    /// a gap it would delete one, so the split has to be exact.
+    #[test]
+    fn every_rule_is_either_bound_to_one_display_or_reported_unassigned() {
+        let mut docked = test_output("DP-1", &[(3840, 2160, 60.0)]);
+        docked.make = "Dell".into();
+        docked.serial = "ABC123".into();
+        let outputs = vec![test_output("eDP-1", &[(1920, 1080, 60.0)]), docked];
+
+        let matcher = |connector: &str| OutputMatch {
+            connector: Some(connector.into()),
+            ..Default::default()
+        };
+        let rules = vec![
+            OutputRule {
+                matcher: matcher("eDP-1"),
+                mode: Some("1920x1080@60.000".into()),
+            },
+            // Two rules chasing the same display: only one can win.
+            OutputRule {
+                matcher: matcher("DP-1"),
+                mode: Some("3840x2160@60.000".into()),
+            },
+            OutputRule {
+                matcher: OutputMatch {
+                    serial: Some("ABC123".into()),
+                    ..Default::default()
+                },
+                mode: Some("3840x2160@60.000".into()),
+            },
+            // And one for a display that is not plugged in.
+            OutputRule {
+                matcher: matcher("HDMI-A-1"),
+                mode: Some("1920x1080@60.000".into()),
+            },
+        ];
+
+        let assignment = assign_rules(&rules, &outputs);
+        let mut covered: Vec<usize> = assignment.by_output.iter().flatten().copied().collect();
+        covered.extend(assignment.unassigned(rules.len()));
+        covered.sort_unstable();
+
+        assert_eq!(covered, (0..rules.len()).collect::<Vec<_>>());
     }
 
     #[test]

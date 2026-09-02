@@ -10,13 +10,22 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rustix::fs::{FlockOperation, flock};
 
 pub const FLATPAK_ID: &str = "io.github.Emanuel4100.PowerDisplay";
+
+/// How long to keep trying for the lock before concluding another daemon really owns it.
+///
+/// [`is_held`] takes a shared lock for an instant to answer its question, and a daemon
+/// that gave up the first time it lost that race would leave the machine with no daemon
+/// at all.
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+const ACQUIRE_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn lock_path() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -32,39 +41,61 @@ pub fn lock_path() -> PathBuf {
     }
 }
 
-/// Returns `Some(file)` holding the exclusive lock, or `None` if another daemon is up.
-pub fn try_acquire() -> Result<Option<File>> {
-    let path = lock_path();
+fn open_lock_file(path: &Path) -> Result<File> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
-    let mut file = OpenOptions::new()
+    OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))
+}
 
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => {
-            file.set_len(0)
-                .and_then(|_| writeln!(file, "{}", std::process::id()))
-                .with_context(|| format!("writing {}", path.display()))?;
-            Ok(Some(file))
+/// Returns `Some(file)` holding the exclusive lock, or `None` if another daemon is up.
+pub fn try_acquire() -> Result<Option<File>> {
+    try_acquire_at(&lock_path())
+}
+
+fn try_acquire_at(path: &Path) -> Result<Option<File>> {
+    let mut file = open_lock_file(path)?;
+
+    let deadline = Instant::now() + ACQUIRE_TIMEOUT;
+    loop {
+        match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => {
+                // Informational only: inside a Flatpak this is the sandbox's own pid
+                // namespace, so it means nothing to anyone outside this instance.
+                file.set_len(0)
+                    .and_then(|_| writeln!(file, "{}", std::process::id()))
+                    .with_context(|| format!("writing {}", path.display()))?;
+                return Ok(Some(file));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) if Instant::now() < deadline => {
+                std::thread::sleep(ACQUIRE_INTERVAL);
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => return Ok(None),
+            Err(err) => return Err(err).with_context(|| format!("locking {}", path.display())),
         }
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
-        Err(err) => Err(err).with_context(|| format!("locking {}", path.display())),
     }
 }
 
-/// True when another process currently holds the daemon lock.
+/// True when a daemon currently holds the lock.
+///
+/// The probe takes a *shared* lock: it still fails against the daemon's exclusive one, but
+/// two windows asking at the same time do not block each other, and the moment it is held
+/// for cannot make a starting daemon think it lost.
 pub fn is_held() -> bool {
-    let path = lock_path();
-    let Ok(file) = File::open(&path) else {
+    is_held_at(&lock_path())
+}
+
+fn is_held_at(path: &Path) -> bool {
+    let Ok(file) = File::open(path) else {
         return false;
     };
-    match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+    match flock(&file, FlockOperation::NonBlockingLockShared) {
         Ok(()) => {
             let _ = flock(&file, FlockOperation::Unlock);
             false
@@ -72,6 +103,35 @@ pub fn is_held() -> bool {
         Err(rustix::io::Errno::WOULDBLOCK) => true,
         Err(_) => false,
     }
+}
+
+/// Waits until no daemon holds the lock, returning false if one still does.
+///
+/// `pkill` returns as soon as the signal is queued, so the process it killed may still be
+/// holding the lock; starting a replacement before then makes the replacement exit.
+pub fn wait_until_free(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !is_held() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(ACQUIRE_INTERVAL);
+    }
+}
+
+/// Held for the duration of an apply so the daemon and a manual `--apply-now` cannot drive
+/// the compositor at the same time. Dropping the returned file releases it.
+///
+/// Failing to take the guard is not worth aborting over: applying unserialised is better
+/// than not applying at all.
+pub fn apply_guard() -> Option<File> {
+    let path = lock_path().with_extension("apply");
+    let file = open_lock_file(&path).ok()?;
+    flock(&file, FlockOperation::LockExclusive).ok()?;
+    Some(file)
 }
 
 /// Host `~/.config/autostart` entry. Inside the sandbox this is visible only with
@@ -171,6 +231,52 @@ mod tests {
             desktop.contains(">/dev/null 2>&1 && exec"),
             "login must not show an error after Software uninstall:\n{desktop}"
         );
+    }
+
+    fn scratch_lock(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("powerdisplay-{}-{name}.lock", std::process::id()))
+    }
+
+    #[test]
+    fn a_second_daemon_backs_off_while_the_first_holds_the_lock() {
+        let path = scratch_lock("held");
+        let _ = fs::remove_file(&path);
+
+        let first = try_acquire_at(&path).unwrap().expect("first should win");
+        assert!(is_held_at(&path));
+        assert!(try_acquire_at(&path).unwrap().is_none());
+
+        drop(first);
+        assert!(!is_held_at(&path));
+        assert!(try_acquire_at(&path).unwrap().is_some());
+        let _ = fs::remove_file(&path);
+    }
+
+    /// The window probes the lock to word its status message. Doing that with an exclusive
+    /// lock could make a daemon starting at the same moment believe it had a rival and
+    /// exit, leaving nothing running.
+    #[test]
+    fn probing_for_a_daemon_does_not_lock_out_a_starting_one() {
+        let path = scratch_lock("probed");
+        let _ = fs::remove_file(&path);
+        open_lock_file(&path).unwrap();
+
+        let probing = path.clone();
+        let probe = std::thread::spawn(move || {
+            for _ in 0..2000 {
+                let _ = is_held_at(&probing);
+            }
+        });
+
+        let held = try_acquire_at(&path).expect("acquiring the lock");
+        probe.join().unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(held.is_some(), "the probe must not starve a starting daemon");
+    }
+
+    #[test]
+    fn the_apply_guard_is_a_different_lock_from_the_instance_lock() {
+        assert_ne!(lock_path(), lock_path().with_extension("apply"));
     }
 
     #[test]

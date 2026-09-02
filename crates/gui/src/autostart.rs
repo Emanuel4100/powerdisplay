@@ -64,9 +64,17 @@ pub fn ensure_fresh_daemon() {
     });
 }
 
+/// Longest we will wait for a killed daemon to let go of its single-instance lock.
+const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub fn restart() -> Result<()> {
     stop()?;
-    std::thread::sleep(Duration::from_millis(300));
+    // `pkill` returns once the signal is queued, not once the process is gone. Starting
+    // the replacement too early meant it lost the instance lock to a daemon that was on
+    // its way out and exited, leaving nothing running at all.
+    if !instance::wait_until_free(EXIT_TIMEOUT) {
+        tracing::warn!("the previous powerdisplayd is still running; starting anyway");
+    }
     start()
 }
 

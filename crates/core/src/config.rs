@@ -1,9 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 
@@ -141,7 +140,21 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
             Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+                let config: Self = toml::from_str(&text)
+                    .with_context(|| format!("parsing {}", path.display()))?;
+                // Reading a future format as if it were this one would apply settings that
+                // mean something else, and saving would then throw away the parts we did
+                // not understand. Refusing is the only safe answer.
+                if config.version > CONFIG_VERSION {
+                    bail!(
+                        "{} is in format version {}, but this build only understands {}; \
+                         update powerdisplay",
+                        path.display(),
+                        config.version,
+                        CONFIG_VERSION
+                    );
+                }
+                Ok(config)
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
@@ -219,9 +232,6 @@ impl ConfigWatcher {
     }
 }
 
-/// Editors and atomic renames produce bursts of events; callers use this to settle.
-pub const CONFIG_DEBOUNCE: Duration = Duration::from_millis(300);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +250,56 @@ mod tests {
         let parsed: Config = toml::from_str("version = 1\n[on_ac]\n").unwrap();
         assert!(parsed.enabled);
         assert!(parsed.on_ac.power_profile.is_none());
+    }
+
+    /// A unique scratch file, so the tests do not need a temp-dir dependency.
+    fn scratch(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "powerdisplay-{}-{}-{name}.toml",
+            std::process::id(),
+            unique
+        ))
+    }
+
+    #[test]
+    fn a_missing_file_is_not_an_error() {
+        let path = scratch("absent");
+        let _ = fs::remove_file(&path);
+        assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn a_broken_file_is_reported_rather_than_ignored() {
+        let path = scratch("broken");
+        fs::write(&path, "this is not = = toml").unwrap();
+        let err = Config::load_from(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(format!("{err:#}").contains("parsing"), "{err:#}");
+    }
+
+    /// Silently reading a newer file as version 1 would apply the wrong settings and then
+    /// discard the fields we did not understand on the next save.
+    #[test]
+    fn a_newer_format_is_refused_instead_of_misread() {
+        let path = scratch("future");
+        fs::write(&path, format!("version = {}\n", CONFIG_VERSION + 1)).unwrap();
+        let err = Config::load_from(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(format!("{err:#}").contains("update powerdisplay"), "{err:#}");
+    }
+
+    #[test]
+    fn saving_and_loading_round_trips_through_a_real_file() {
+        let path = scratch("roundtrip");
+        let mut config = Config::default();
+        config.on_ac.power_profile = Some("performance".into());
+        config.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded, config);
     }
 
     #[test]

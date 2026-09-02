@@ -13,6 +13,7 @@ use gtk::{
 
 use powerdisplay_core::config::{Config, PowerState};
 use powerdisplay_core::engine::Engine;
+use powerdisplay_core::instance;
 use powerdisplay_core::power;
 
 use crate::autostart;
@@ -85,7 +86,12 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
         }
     });
     let engine = Rc::new(engine);
-    let config = Rc::new(RefCell::new(Config::load().unwrap_or_default()));
+
+    // A config we could not read must not be quietly replaced by the defaults shown here:
+    // the window says so, and saving over it becomes something the user asks for.
+    let loaded = Config::load();
+    let config_error = loaded.as_ref().err().map(|err| format!("{err:#}"));
+    let config = Rc::new(RefCell::new(loaded.unwrap_or_default()));
     let power_profiles = engine.power_profiles();
 
     let (outputs, enumeration_error) = match engine.outputs() {
@@ -107,9 +113,18 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
     status.add_css_class("pd-status");
     status.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
-    let save = Button::with_label("Save");
+    let save = Button::with_label(if config_error.is_some() {
+        "Replace saved settings"
+    } else {
+        "Save"
+    });
     save.add_css_class("suggested-action");
-    save.set_sensitive(false);
+    save.set_sensitive(config_error.is_some());
+    if config_error.is_some() {
+        save.set_tooltip_text(Some(
+            "Your saved settings could not be read. Saving replaces that file with what is shown here.",
+        ));
+    }
 
     let on_change: Rc<dyn Fn()> = Rc::new({
         let save = save.clone();
@@ -192,6 +207,9 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
             match config.save() {
                 Ok(()) => {
                     save.set_sensitive(false);
+                    // Whatever was wrong with the file on disk is now gone.
+                    save.set_label("Save");
+                    save.set_tooltip_text(None);
                     let message = if autostart::is_running() {
                         "Saved. The background service has picked it up."
                     } else if autostart::available() {
@@ -220,7 +238,12 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
                 _ => PowerState::Ac,
             };
 
-            let report = engine.apply(&config, state);
+            // The daemon may be applying a profile of its own right now; taking its guard
+            // keeps the two from driving the compositor at the same time.
+            let report = {
+                let _guard = instance::apply_guard();
+                engine.apply(&config, state)
+            };
             set_status(&status, &report.summary(), !report.succeeded());
         }
     });
@@ -243,7 +266,13 @@ fn build_main(window: &ApplicationWindow, header: &HeaderBar, engine: Engine) {
     // Hug the cards instead of opening at 700px of empty window.
     window.set_default_size(680, -1);
 
-    if let Some(err) = enumeration_error {
+    if let Some(err) = &config_error {
+        set_status(
+            &status,
+            &format!("Could not read your saved settings: {err}"),
+            true,
+        );
+    } else if let Some(err) = enumeration_error {
         set_status(&status, &format!("Could not list displays: {err}"), true);
     }
 }

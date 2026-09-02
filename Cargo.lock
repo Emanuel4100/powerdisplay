@@ -992,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "powerdisplay-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "notify",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "powerdisplay-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "powerdisplay-core",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "powerdisplay-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "gtk4",

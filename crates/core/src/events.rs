@@ -69,7 +69,7 @@ impl EventSources {
         // DRM events cover monitor hotplug on every driver and compositor, which is why
         // this is not done through a desktop-specific signal.
         let display_tx = tx.clone();
-        if let Err(err) = spawn_udev("drm", DRM_RESYNC_INTERVAL, move || {
+        if let Err(err) = spawn_udev("drm", DRM_RESYNC_INTERVAL, move |_| {
             display_tx.send(Event::DisplaysChanged).is_ok()
         }) {
             tracing::warn!(error = %err, "no monitor hotplug detection");

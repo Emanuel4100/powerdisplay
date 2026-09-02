@@ -16,7 +16,11 @@ use powerdisplay_core::power;
 use powerdisplay_core::{Controller, instance, sandbox};
 
 /// How often to check that GNOME Software (or `flatpak uninstall`) has not removed us.
-const UNINSTALL_POLL: Duration = Duration::from_secs(5);
+///
+/// The check spawns a process on the host, so it is deliberately infrequent: noticing an
+/// uninstall a minute late costs nothing, and waking every few seconds to ask is a poor
+/// look for something that exists to save power.
+const UNINSTALL_POLL: Duration = Duration::from_secs(60);
 
 const USAGE: &str = "\
 powerdisplayd - apply a display mode and power profile based on the power source
@@ -112,6 +116,9 @@ fn run(options: &Options) -> Result<()> {
         let engine = Engine::new(options.dry_run)?;
         let config = Config::load().context("loading the configuration")?;
         let state = power::read_state();
+        // A running daemon may be mid-apply; two processes driving the compositor at once
+        // is how a mode change ends up half-applied.
+        let _guard = instance::apply_guard();
         let report = engine.apply(&config, state);
         log_report(state, &report);
         return Ok(());
@@ -126,7 +133,7 @@ fn run(options: &Options) -> Result<()> {
     };
 
     let config = Config::load().context("loading the configuration")?;
-    watch(wait_for_session(options.dry_run), config)
+    watch(options.dry_run, config)
 }
 
 fn run_self_test() -> Result<()> {
@@ -185,10 +192,10 @@ fn show(dry_run: bool) -> Result<()> {
         Err(err) => {
             println!("Displays:     unavailable");
             println!();
-            println!("{err:#}");
-            println!();
             println!("Set POWERDISPLAY_BACKEND to gnome, kde, wlroots or x11 to force one.");
-            return Ok(());
+            // Everything above still printed, but a script asking what this session can do
+            // must not be told "fine" when the answer is "nothing".
+            return Err(err).context("no usable display backend for this session");
         }
     };
 
@@ -215,8 +222,9 @@ fn show(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn watch(engine: Engine, config: Config) -> Result<()> {
+fn watch(dry_run: bool, config: Config) -> Result<()> {
     let sources = EventSources::spawn().context("starting the system watchers")?;
+    let mut engine = wait_for_session(dry_run);
 
     tracing::info!(
         backend = engine.backend_name(),
@@ -225,10 +233,21 @@ fn watch(engine: Engine, config: Config) -> Result<()> {
 
     let mut controller = Controller::new(config, power::read_state(), Instant::now());
 
+    // Outside a sandbox there is no app-store copy to disappear, so there is nothing to
+    // wake up for and the loop can block until something actually happens.
+    let uninstall_poll = powerdisplay_core::sandboxed().then_some(UNINSTALL_POLL);
+    let mut next_install_check = Instant::now() + UNINSTALL_POLL;
+
     loop {
-        if !instance::app_still_installed() {
-            instance::cleanup_after_uninstall();
-            return Ok(());
+        if let Some(interval) = uninstall_poll {
+            let now = Instant::now();
+            if now >= next_install_check {
+                next_install_check = now + interval;
+                if !instance::app_still_installed() {
+                    instance::cleanup_after_uninstall();
+                    return Ok(());
+                }
+            }
         }
 
         // Apply *before* reading the next event. After our own mode set, DRM udev events
@@ -237,17 +256,43 @@ fn watch(engine: Engine, config: Config) -> Result<()> {
         // won over the AC profile after a reinstall.
         if controller.take_due(Instant::now()) {
             let state = power::read_state();
-            controller.applied(state);
-            let report = engine.apply(controller.config(), state);
+            let report = {
+                let _guard = instance::apply_guard();
+                engine.apply(controller.config(), state)
+            };
             log_report(state, &report);
+
+            if report.succeeded() {
+                controller.applied(state);
+            } else {
+                match controller.schedule_retry(Instant::now()) {
+                    Some(delay) => {
+                        tracing::warn!(retry_in = ?delay, "the profile did not apply; trying again")
+                    }
+                    None => {
+                        // Failing every attempt usually means the session we connected to
+                        // at start-up has gone, and every later call would fail the same
+                        // way. Reconnecting is the only thing left to try.
+                        tracing::warn!("giving up on this change; reconnecting to the session");
+                        controller.applied(state);
+                        engine = wait_for_session(dry_run);
+                        tracing::info!(backend = engine.backend_name(), "reconnected");
+                    }
+                }
+            }
             continue;
         }
 
-        let wait = match controller.wait(Instant::now()) {
-            Some(timeout) => timeout.min(UNINSTALL_POLL),
-            None => UNINSTALL_POLL,
+        let wait = match (controller.wait(Instant::now()), uninstall_poll) {
+            (Some(pending), Some(poll)) => Some(pending.min(poll)),
+            (Some(pending), None) => Some(pending),
+            (None, poll) => poll,
         };
-        let received = sources.rx.recv_timeout(wait);
+
+        let received = match wait {
+            Some(timeout) => sources.rx.recv_timeout(timeout),
+            None => sources.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
 
         match received {
             Ok(event) => {

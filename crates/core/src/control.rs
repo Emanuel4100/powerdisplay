@@ -27,6 +27,14 @@ impl Pending {
         }
     }
 
+    /// A retry is not coalescing anything, so its own delay is also its hard limit.
+    fn after(delay: Duration, now: Instant) -> Self {
+        Self {
+            settles_at: now + delay,
+            latest: now + delay.max(Self::MAX_WAIT),
+        }
+    }
+
     fn extend(&mut self, event: Event, now: Instant) {
         self.settles_at = (now + event.settle_delay()).max(self.settles_at);
     }
@@ -41,15 +49,28 @@ pub struct Controller {
     state: PowerState,
     config: Config,
     pending: Option<Pending>,
+    retries: usize,
 }
 
 impl Controller {
+    /// Delays between attempts after an apply fails. A compositor that refuses right now
+    /// usually stops refusing shortly afterwards — GNOME rejects configuration changes
+    /// while the screen is locked or a settings dialog is open — so the first retries are
+    /// quick and the last one covers a longer interruption.
+    const RETRY_BACKOFF: [Duration; 4] = [
+        Duration::from_secs(1),
+        Duration::from_secs(3),
+        Duration::from_secs(10),
+        Duration::from_secs(30),
+    ];
+
     pub fn new(config: Config, state: PowerState, now: Instant) -> Self {
         let pending = config.apply_on_start.then(|| Pending::new(Event::Power(state), now));
         Self {
             state,
             config,
             pending,
+            retries: 0,
         }
     }
 
@@ -92,6 +113,19 @@ impl Controller {
     /// not start another debounce.
     pub fn applied(&mut self, state: PowerState) {
         self.state = state;
+        self.retries = 0;
+    }
+
+    /// Schedule another attempt after an apply failed, returning how long the caller will
+    /// wait. `None` means the retries for this change are exhausted.
+    ///
+    /// Without this a transient refusal was permanent: `take_due` had already cleared the
+    /// pending apply, so nothing would try again until the charger was next touched.
+    pub fn schedule_retry(&mut self, now: Instant) -> Option<Duration> {
+        let delay = *Self::RETRY_BACKOFF.get(self.retries)?;
+        self.retries += 1;
+        self.pending = Some(Pending::after(delay, now));
+        Some(delay)
     }
 
     /// Install a new config. No-ops if nothing actually changed.
@@ -117,6 +151,8 @@ impl Controller {
     }
 
     fn queue(&mut self, event: Event, now: Instant) {
+        // A fresh trigger deserves the full retry budget, whatever the last one spent.
+        self.retries = 0;
         match &mut self.pending {
             Some(pending) => pending.extend(event, now),
             None => self.pending = Some(Pending::new(event, now)),
@@ -216,6 +252,59 @@ mod tests {
         let now = t0();
         let c = controller(now);
         assert_eq!(c.wait(now + Duration::from_secs(30)), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_failed_apply_is_tried_again() {
+        let now = t0();
+        let mut c = controller(now);
+        assert!(c.take_due(now + Duration::from_secs(2)));
+        assert!(!c.due(now + Duration::from_secs(2)));
+
+        let delay = c.schedule_retry(now + Duration::from_secs(2)).unwrap();
+        assert!(!c.due(now + Duration::from_secs(2) + delay - Duration::from_millis(1)));
+        assert!(c.due(now + Duration::from_secs(2) + delay));
+    }
+
+    #[test]
+    fn retries_back_off_and_then_give_up() {
+        let now = t0();
+        let mut c = controller(now);
+
+        let mut delays = Vec::new();
+        while let Some(delay) = c.schedule_retry(now) {
+            delays.push(delay);
+            assert!(delays.len() <= 8, "schedule_retry must not loop forever");
+        }
+
+        assert!(delays.len() > 1);
+        assert!(
+            delays.windows(2).all(|pair| pair[0] < pair[1]),
+            "each retry should wait longer: {delays:?}"
+        );
+    }
+
+    #[test]
+    fn a_new_event_restores_the_retry_budget() {
+        let now = t0();
+        let mut c = controller(now);
+        while c.schedule_retry(now).is_some() {}
+
+        c.on_event(Event::Power(PowerState::Battery), now);
+        assert!(c.schedule_retry(now).is_some());
+    }
+
+    #[test]
+    fn a_long_retry_is_not_cut_short_by_the_coalescing_cap() {
+        let now = t0();
+        let mut c = controller(now);
+        let mut last = Duration::ZERO;
+        while let Some(delay) = c.schedule_retry(now) {
+            last = delay;
+        }
+        assert!(last > Pending::MAX_WAIT);
+        assert!(!c.due(now + Pending::MAX_WAIT));
+        assert!(c.due(now + last));
     }
 
     #[test]

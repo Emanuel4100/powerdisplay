@@ -6,7 +6,7 @@ use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, CheckButton, DropDown, Label, Orientation, StringList};
 
 use powerdisplay_core::config::{OutputRule, Profile};
-use powerdisplay_core::display::{Mode, Output};
+use powerdisplay_core::display::{Mode, Output, assign_rules};
 use powerdisplay_core::power::profiles::describe;
 
 const LEAVE_UNCHANGED: &str = "Leave unchanged";
@@ -50,6 +50,9 @@ fn group_modes(output: &Output) -> Vec<ResolutionGroup> {
 struct OutputRow {
     output: Output,
     groups: Rc<Vec<ResolutionGroup>>,
+    /// What the config already said about this display, kept so a row the dropdowns
+    /// cannot express does not silently erase it.
+    existing: Option<OutputRule>,
     enable: CheckButton,
     resolution: DropDown,
     refresh: DropDown,
@@ -143,6 +146,7 @@ impl OutputRow {
             Self {
                 output: output.clone(),
                 groups,
+                existing: rule.cloned(),
                 enable,
                 resolution,
                 refresh,
@@ -151,19 +155,31 @@ impl OutputRow {
         )
     }
 
+    /// The mode the two dropdowns currently name.
+    ///
+    /// `selected()` is `GTK_INVALID_LIST_POSITION` when a dropdown has no selection, which
+    /// is why this is a lookup rather than an index.
+    fn selected_mode(&self) -> Option<&Mode> {
+        let group = self.groups.get(self.resolution.selected() as usize)?;
+        group.modes.get(self.refresh.selected() as usize)
+    }
+
     /// `None` when this display is set to be left alone.
     fn collect(&self) -> Option<OutputRule> {
         if !self.enable.is_active() {
             return None;
         }
 
-        let group = self.groups.get(self.resolution.selected() as usize)?;
-        let mode = group.modes.get(self.refresh.selected() as usize)?;
-
-        Some(OutputRule {
-            matcher: self.output.matcher(),
-            mode: Some(mode.id.clone()),
-        })
+        match self.selected_mode() {
+            Some(mode) => Some(OutputRule {
+                matcher: self.output.matcher(),
+                mode: Some(mode.id.clone()),
+            }),
+            // The dropdowns cannot describe this display right now, usually because it
+            // reported no modes. Dropping the rule here would delete a setting the user
+            // never touched, so keep what the config already said.
+            None => self.existing.clone(),
+        }
     }
 }
 
@@ -281,6 +297,8 @@ pub struct ProfilePage {
     power_profile: DropDown,
     persist: CheckButton,
     rows: Vec<OutputRow>,
+    /// Rules for displays that are not connected, carried through untouched.
+    absent: Vec<OutputRule>,
 }
 
 impl ProfilePage {
@@ -361,17 +379,25 @@ impl ProfilePage {
             displays.append(&empty);
         }
 
-        for output in outputs {
-            let rule = profile.outputs.iter().find(|rule| {
-                rule.matcher
-                    .score(&output.connector, &output.make, &output.model, &output.serial)
-                    .is_some()
-            });
+        // The same matching the daemon will do, so a rule is never shown against one
+        // display and then applied to another.
+        let assignment = assign_rules(&profile.outputs, outputs);
 
+        for (index, output) in outputs.iter().enumerate() {
+            let rule = assignment.rule_for(index, &profile.outputs);
             let (row, widget) = OutputRow::build(output, rule, on_change.clone());
             rows.push(row);
             displays.append(&widget);
         }
+
+        // Rules for displays that are not plugged in right now have no row to be edited
+        // in. Saving must carry them through rather than erase settings for a monitor that
+        // simply happens to be unplugged.
+        let absent: Vec<OutputRule> = assignment
+            .unassigned(profile.outputs.len())
+            .into_iter()
+            .map(|index| profile.outputs[index].clone())
+            .collect();
 
         let persist = CheckButton::with_label("Remember this layout in the desktop's display settings");
         persist.set_active(profile.persist_display_config && supports_persist);
@@ -401,18 +427,23 @@ impl ProfilePage {
             power_profile,
             persist,
             rows,
+            absent,
         }
     }
 
     /// Reads the widgets back into a config profile.
     pub fn collect(&self) -> Profile {
         let selected = self.power_profile.selected() as usize;
+        let mut outputs: Vec<OutputRule> =
+            self.rows.iter().filter_map(OutputRow::collect).collect();
+        outputs.extend(self.absent.iter().cloned());
+
         Profile {
             power_profile: (selected > 0)
                 .then(|| self.power_profile_names.get(selected).cloned())
                 .flatten(),
             persist_display_config: self.persist.is_active(),
-            outputs: self.rows.iter().filter_map(OutputRow::collect).collect(),
+            outputs,
         }
     }
 }
